@@ -9,3 +9,6 @@ Cargo.lock
 .env
 docker/.env
 dist/
+*.asc
+*.pem
+*.key
