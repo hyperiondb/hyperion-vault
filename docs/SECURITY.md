@@ -12,6 +12,7 @@
 | Least privilege in DB | extension | `REVOKE ALL FROM PUBLIC`, RLS `FORCE`d on all tables, scoped service-role policies. |
 | Auditing | API + DB | `vault.audit_log` records actor, client IP, action, outcome. |
 | Memory hygiene | core | `Zeroizing` for DEKs and master keys. |
+| KMS-outage resilience | API | In-memory unwrapped-DEK cache (`VAULT_DEK_CACHE_TTL_SECS`); plaintext is never cached. |
 
 ## Key management
 

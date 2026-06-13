@@ -14,7 +14,11 @@ fn seal_open_round_trips() {
     let plaintext = b"super-secret-value";
 
     let ct = seal(&dek, &nonce, &aad, plaintext).unwrap();
-    assert_ne!(ct.as_slice(), plaintext, "ciphertext must not equal plaintext");
+    assert_ne!(
+        ct.as_slice(),
+        plaintext,
+        "ciphertext must not equal plaintext"
+    );
     let pt = open(&dek, &nonce, &aad, &ct).unwrap();
     assert_eq!(pt, plaintext);
 }
@@ -26,7 +30,10 @@ fn ciphertext_tamper_is_rejected() {
     let aad = aad_for("name", 1);
     let mut ct = seal(&dek, &nonce, &aad, b"value").unwrap();
     ct[0] ^= 0x01;
-    assert!(open(&dek, &nonce, &aad, &ct).is_err(), "tampered ciphertext must fail AEAD");
+    assert!(
+        open(&dek, &nonce, &aad, &ct).is_err(),
+        "tampered ciphertext must fail AEAD"
+    );
 }
 
 #[test]
@@ -110,8 +117,14 @@ fn envelope_wrapped_dek_is_randomized_per_call() {
     let wrapper = LocalKeyWrapper::random();
     let a = seal_envelope(&wrapper, b"aad", b"value").unwrap();
     let b = seal_envelope(&wrapper, b"aad", b"value").unwrap();
-    assert_ne!(a.wrapped_dek, b.wrapped_dek, "DEK wrapping must be nondeterministic");
-    assert_ne!(a.ciphertext, b.ciphertext, "ciphertext must be nondeterministic");
+    assert_ne!(
+        a.wrapped_dek, b.wrapped_dek,
+        "DEK wrapping must be nondeterministic"
+    );
+    assert_ne!(
+        a.ciphertext, b.ciphertext,
+        "ciphertext must be nondeterministic"
+    );
 }
 
 #[test]

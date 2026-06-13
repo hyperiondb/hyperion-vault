@@ -45,7 +45,13 @@ pub fn seal(
 ) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(Key::from_slice(&dek[..]));
     cipher
-        .encrypt(XNonce::from_slice(&nonce[..]), Payload { msg: plaintext, aad })
+        .encrypt(
+            XNonce::from_slice(&nonce[..]),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| Error::Encryption)
 }
 
@@ -57,7 +63,13 @@ pub fn open(
 ) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(Key::from_slice(&dek[..]));
     cipher
-        .decrypt(XNonce::from_slice(&nonce[..]), Payload { msg: ciphertext, aad })
+        .decrypt(
+            XNonce::from_slice(&nonce[..]),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| Error::Decryption)
 }
 

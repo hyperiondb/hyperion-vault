@@ -50,7 +50,9 @@ async fn get_secret(
     guard: ReaderGuard,
     Path(name): Path<String>,
 ) -> ApiResult<Json<SecretValue>> {
-    Ok(Json(service::get_secret(&state, &name, guard.client_ip).await?))
+    Ok(Json(
+        service::get_secret(&state, &name, guard.client_ip).await?,
+    ))
 }
 
 async fn update_secret(
@@ -59,7 +61,9 @@ async fn update_secret(
     Path(name): Path<String>,
     Json(req): Json<UpdateSecretRequest>,
 ) -> ApiResult<Json<SecretMetadata>> {
-    Ok(Json(service::update_secret(&state, &actor.0, &name, req).await?))
+    Ok(Json(
+        service::update_secret(&state, &actor.0, &name, req).await?,
+    ))
 }
 
 async fn delete_secret(

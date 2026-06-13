@@ -23,6 +23,8 @@ pub struct Config {
     pub kms_key_id: String,
     pub local_master_key_b64: Option<String>,
     pub rotation_poll_secs: u64,
+    pub dek_cache_ttl_secs: u64,
+    pub kms_max_retries: u32,
     pub node_name: String,
 }
 
@@ -79,6 +81,12 @@ impl Config {
             rotation_poll_secs: env_or("VAULT_ROTATION_POLL_SECS", "15")
                 .parse()
                 .context("VAULT_ROTATION_POLL_SECS must be an integer")?,
+            dek_cache_ttl_secs: env_or("VAULT_DEK_CACHE_TTL_SECS", "300")
+                .parse()
+                .context("VAULT_DEK_CACHE_TTL_SECS must be an integer (seconds; 0 disables)")?,
+            kms_max_retries: env_or("VAULT_KMS_MAX_RETRIES", "5")
+                .parse()
+                .context("VAULT_KMS_MAX_RETRIES must be an integer (0 disables retries)")?,
             node_name: env_or("VAULT_NODE_NAME", &hostname_fallback()),
         })
     }

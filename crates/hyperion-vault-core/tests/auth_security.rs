@@ -15,9 +15,14 @@ fn generated_tokens_are_unique() {
 #[test]
 fn generated_tokens_are_url_safe_and_long() {
     let token = generate_token();
-    assert!(token.len() >= 43, "32 random bytes base64url is at least 43 chars");
     assert!(
-        token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        token.len() >= 43,
+        "32 random bytes base64url is at least 43 chars"
+    );
+    assert!(
+        token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
         "token must be url-safe base64 without padding"
     );
 }

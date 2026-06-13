@@ -31,15 +31,30 @@ fn current_version_never_expires() {
 fn superseded_version_valid_until_grace_expiry() {
     let policy = RotationPolicy::new(Duration::from_secs(3600), Duration::from_secs(300));
     let expiry = policy.grace_expiry_unix(1_000);
-    assert!(version_active(1_000, Some(expiry)), "valid immediately after rotation");
-    assert!(version_active(1_299, Some(expiry)), "valid within grace window");
-    assert!(!version_active(1_300, Some(expiry)), "invalid at grace expiry");
-    assert!(!version_active(2_000, Some(expiry)), "invalid after grace expiry");
+    assert!(
+        version_active(1_000, Some(expiry)),
+        "valid immediately after rotation"
+    );
+    assert!(
+        version_active(1_299, Some(expiry)),
+        "valid within grace window"
+    );
+    assert!(
+        !version_active(1_300, Some(expiry)),
+        "invalid at grace expiry"
+    );
+    assert!(
+        !version_active(2_000, Some(expiry)),
+        "invalid after grace expiry"
+    );
 }
 
 #[test]
 fn zero_grace_supersedes_immediately() {
     let policy = RotationPolicy::new(Duration::from_secs(3600), Duration::from_secs(0));
     let expiry = policy.grace_expiry_unix(1_000);
-    assert!(!version_active(1_000, Some(expiry)), "with zero grace the old version is invalid at once");
+    assert!(
+        !version_active(1_000, Some(expiry)),
+        "with zero grace the old version is invalid at once"
+    );
 }

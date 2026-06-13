@@ -1,4 +1,6 @@
-use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, BgWorkerStartTime, SignalWakeFlags};
+use pgrx::bgworkers::{
+    BackgroundWorker, BackgroundWorkerBuilder, BgWorkerStartTime, SignalWakeFlags,
+};
 use pgrx::prelude::*;
 use std::time::Duration;
 
@@ -41,7 +43,7 @@ pub extern "C-unwind" fn hyperion_vault_rotation_main(_arg: pg_sys::Datum) {
     );
 
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(
-        config::scan_interval_secs() as u64,
+        config::scan_interval_secs() as u64
     ))) {
         if !config::rotation_enabled() {
             continue;

@@ -48,6 +48,10 @@ Status: **in progress**
 - **Automatic rotation.** An in-database background worker (running only on the
   primary) enqueues due rotations and `NOTIFY`s; the API's rotation worker
   performs the re-encryption and expires superseded versions after grace.
+- **KMS-outage resilience.** Unwrapped data keys are cached in memory for
+  `VAULT_DEK_CACHE_TTL_SECS`, so reads of previously-read secrets keep working
+  even if AWS KMS is briefly unavailable, and KMS calls are retried with
+  exponential backoff up to `VAULT_KMS_MAX_RETRIES` to ride out rate-limits.
 - **Audit log.** Every operation is recorded (actor, client IP, action,
   outcome) in `vault.audit_log`.
 - **Defense in depth.** Row-level security on every table, a dedicated service
@@ -69,8 +73,9 @@ Status: **in progress**
 | `crates/hyperion-vault` | lib | Umbrella crate re-exporting the security core as a single dependency. |
 | `extension/` (`hyperion_vault`) | cdylib | The pgrx PostgreSQL extension: `vault` schema, RLS, helper functions, rotation supervisor background worker. |
 | `docs/` | — | Architecture, decisions, threat model, API and security docs. |
-| `docker/` | — | Dockerfile + 3-node `pg_replica` + vault compose stack. |
-| `scripts/` | — | Test and security-test entrypoints. |
+| `docker/` | — | Node image (built on the `pg_replica` image) + 3-node cluster compose + e2e overlay. |
+| `scripts/` | — | `test.sh`, `test-security.sh`, and the `e2e/` cluster suite. |
+| `packaging/` | — | `.deb` build + signed apt-repo assembly (mirrors `pg_replica`). |
 
 The encryption algorithm choice (XChaCha20-Poly1305), the application-layer
 (vs in-database) encryption decision, and the primary-routing strategy are
@@ -103,11 +108,18 @@ Vault leverages this directly:
 # 1. Build + test the security core (no Postgres needed)
 cargo test -p hyperion-vault-core
 
-# 2. Bring up a 3-node pg_replica cluster with vault on each node
-cd docker && cp .env.example .env && docker compose up --build
+# 2. Build the pg_replica cluster image first (sibling repo)
+cd ../pg_replica && docker compose -f docker/docker-compose.yml build
+
+# 3. Bring up a 3-node cluster with vault + an API sidecar on each node
+cd ../vault/docker && cp .env.example .env && docker compose up --build
+
+# 4. Run the end-to-end suite (CRUD, auth, replicated reads, rotation)
+bash scripts/e2e.sh        # from the repo root
 ```
 
-See [`docs/API.md`](docs/API.md) for full request/response examples and
+APIs listen on `localhost:8200` (node1), `:8201` (node2), `:8202` (node3). See
+[`docs/API.md`](docs/API.md) for full request/response examples and
 [`docker/`](docker/) for the cluster topology.
 
 ```bash
@@ -143,9 +155,24 @@ curl -sS -X POST localhost:8200/v1/secrets \
 | `VAULT_KMS_KEY_ID` | — | AWS KMS key id/ARN (required for `aws`). |
 | `VAULT_LOCAL_MASTER_KEY` | — | base64 32-byte master key for `local` mode. |
 | `VAULT_ROTATION_POLL_SECS` | `15` | How often the API worker claims rotation jobs. |
+| `VAULT_DEK_CACHE_TTL_SECS` | `300` | TTL of the in-memory decrypted-DEK cache; lets previously-read secrets survive a KMS outage. `0` disables. |
+| `VAULT_KMS_MAX_RETRIES` | `5` | Retry KMS calls (writes always; reads on a cache miss) up to N times with exponential backoff, to ride out rate-limits/brief outages. `0` disables. |
 
 The extension is configured via GUCs: `hyperion_vault.rotation_enabled`,
 `hyperion_vault.scan_interval_secs`, `hyperion_vault.database`.
+
+---
+
+## Install (Debian/Ubuntu)
+
+A `[cd]`-tagged commit (or a manual workflow run) builds a signed apt repo on
+GitHub Pages via `.github/workflows/packages.yml`. The `.deb` ships the
+extension and the `hyperion-vault-api` binary (`/usr/bin/hyperion-vault-api`):
+
+```bash
+curl -fsSL https://hyperiondb.github.io/hyperion-vault/install.sh | sudo bash
+sudo apt-get install -y postgresql-18-hyperion-vault
+```
 
 ---
 

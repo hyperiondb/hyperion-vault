@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use hyperion_vault_core::SecretKind;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 pub struct CreateSecretRequest {

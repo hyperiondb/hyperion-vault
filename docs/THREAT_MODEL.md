@@ -38,7 +38,7 @@
 | **DoS** via large bodies | 1 MiB request body limit; secret value size cap. |
 | **Elevation** via rotation worker races | `rotation_jobs` claimed with `FOR UPDATE SKIP LOCKED`; stale claims reclaimed; rotation is a primary-only write. |
 | **Nonce reuse** weakening AEAD | 192-bit random XChaCha20 nonces, fresh per version; uniqueness covered by tests. |
-| **Key material in memory** after use | `Zeroizing` DEKs/master keys. |
+| **Key material in memory** after use | `Zeroizing` DEKs/master keys. The DEK cache holds unwrapped keys for up to `VAULT_DEK_CACHE_TTL_SECS` (never plaintext); lower or disable the TTL to shrink the window. |
 
 ## Residual risks / open items (must close before production)
 

@@ -66,7 +66,10 @@ async fn tick(state: &SharedState) -> Result<()> {
 async fn lookup_name(state: &SharedState, secret_id: &str) -> Result<Option<String>> {
     let client = state.db.reader().await?;
     let row = client
-        .query_opt("SELECT name FROM vault.secrets WHERE id = $1::uuid", &[&secret_id])
+        .query_opt(
+            "SELECT name FROM vault.secrets WHERE id = $1::uuid",
+            &[&secret_id],
+        )
         .await?;
     Ok(row.map(|row| row.get(0)))
 }

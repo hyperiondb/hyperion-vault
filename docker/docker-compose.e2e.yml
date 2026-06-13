@@ -1,0 +1,20 @@
+name: hyperion-vault
+
+services:
+  runner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.runner
+    image: hyperion-vault-runner:e2e
+    container_name: hv-runner
+    environment:
+      SU_PASSWORD: "${SU_PASSWORD:-pgr_super_pw}"
+      VAULT_SERVICE_USER: "${VAULT_SERVICE_USER:-vault_service}"
+      VAULT_SERVICE_PASSWORD: "${VAULT_SERVICE_PASSWORD:-vault_service_pw}"
+      VAULT_ADMIN_TOKEN: "${VAULT_ADMIN_TOKEN:-dev-admin-token-change-me}"
+      APP_DB: "${APP_DB:-postgres}"
+    volumes:
+      - ..:/work
+    working_dir: /work
+    networks: [vault]
+    depends_on: [api1, api2, api3]

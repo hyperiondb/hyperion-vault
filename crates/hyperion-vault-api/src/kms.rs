@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -15,14 +16,68 @@ pub trait KmsProvider: Send + Sync {
 }
 
 pub async fn build(cfg: &Config) -> Result<Arc<dyn KmsProvider>> {
-    match cfg.kms_mode {
-        KmsMode::Aws => Ok(Arc::new(AwsKms::new(cfg.kms_key_id.clone()).await)),
+    let inner: Arc<dyn KmsProvider> = match cfg.kms_mode {
+        KmsMode::Aws => Arc::new(AwsKms::new(cfg.kms_key_id.clone()).await),
         KmsMode::Local => {
             let wrapper = match &cfg.local_master_key_b64 {
                 Some(encoded) => LocalKeyWrapper::from_base64(encoded, "local")?,
                 None => LocalKeyWrapper::random(),
             };
-            Ok(Arc::new(LocalKms { inner: wrapper }))
+            Arc::new(LocalKms { inner: wrapper })
+        }
+    };
+
+    if cfg.kms_max_retries == 0 {
+        Ok(inner)
+    } else {
+        Ok(Arc::new(RetryingKms::new(inner, cfg.kms_max_retries)))
+    }
+}
+
+pub struct RetryingKms {
+    inner: Arc<dyn KmsProvider>,
+    max_retries: u32,
+}
+
+impl RetryingKms {
+    pub fn new(inner: Arc<dyn KmsProvider>, max_retries: u32) -> Self {
+        Self { inner, max_retries }
+    }
+
+    fn backoff(&self, attempt: u32) -> Duration {
+        Duration::from_millis(100u64.saturating_mul(1u64 << attempt.min(6)))
+    }
+}
+
+#[async_trait]
+impl KmsProvider for RetryingKms {
+    async fn generate_data_key(&self) -> Result<DataKey> {
+        let mut attempt = 0;
+        loop {
+            match self.inner.generate_data_key().await {
+                Ok(value) => return Ok(value),
+                Err(err) if attempt < self.max_retries => {
+                    tracing::warn!(attempt, max = self.max_retries, error = %err, "kms generate_data_key failed; retrying");
+                    tokio::time::sleep(self.backoff(attempt)).await;
+                    attempt += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn decrypt_data_key(&self, wrapped: &[u8], key_id: &str) -> Result<Dek> {
+        let mut attempt = 0;
+        loop {
+            match self.inner.decrypt_data_key(wrapped, key_id).await {
+                Ok(value) => return Ok(value),
+                Err(err) if attempt < self.max_retries => {
+                    tracing::warn!(attempt, max = self.max_retries, error = %err, "kms decrypt failed; retrying");
+                    tokio::time::sleep(self.backoff(attempt)).await;
+                    attempt += 1;
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
 }
@@ -54,7 +109,9 @@ impl KmsProvider for AwsKms {
             .await
             .map_err(|err| anyhow::anyhow!("kms generate_data_key failed: {err:?}"))?;
 
-        let plaintext = out.plaintext().context("kms returned no plaintext data key")?;
+        let plaintext = out
+            .plaintext()
+            .context("kms returned no plaintext data key")?;
         let plaintext = dek_from_slice(plaintext.as_ref())?;
         let wrapped = out
             .ciphertext_blob()

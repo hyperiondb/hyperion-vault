@@ -39,7 +39,9 @@ pub async fn create_secret(
             value
         }
         (SecretKind::Manual, None) => {
-            return Err(ApiError::BadRequest("manual secret requires 'value'".into()))
+            return Err(ApiError::BadRequest(
+                "manual secret requires 'value'".into(),
+            ))
         }
         (SecretKind::Automatic, None) => auth::generate_token(),
     };
@@ -195,8 +197,13 @@ pub async fn update_secret(
             ));
         }
     }
-    let grace_override = normalize_grace(req.grace_period_secs.map(Some).unwrap_or(None))?;
-    let _ = grace_override;
+    if let Some(secs) = req.grace_period_secs {
+        if secs < 0 {
+            return Err(ApiError::BadRequest(
+                "grace_period_secs must not be negative".into(),
+            ));
+        }
+    }
 
     let mut client = state.db.writer().await?;
     let tx = client.transaction().await?;
@@ -391,7 +398,15 @@ pub async fn verify(
         }
     }
 
-    audit(state, None, Some(client_ip), "verify", Some(name), "invalid").await;
+    audit(
+        state,
+        None,
+        Some(client_ip),
+        "verify",
+        Some(name),
+        "invalid",
+    )
+    .await;
     Ok(VerifyResponse {
         valid: false,
         version: None,
@@ -428,7 +443,14 @@ async fn open_version(
     let nonce: [u8; NONCE_LEN] = nonce
         .try_into()
         .map_err(|_| ApiError::Internal(anyhow!("stored nonce has invalid length")))?;
-    let dek: Dek = state.kms.decrypt_data_key(wrapped, key_id).await?;
+    let dek: Dek = match state.dek_cache.get(wrapped) {
+        Some(dek) => dek,
+        None => {
+            let dek = state.kms.decrypt_data_key(wrapped, key_id).await?;
+            state.dek_cache.put(wrapped.to_vec(), dek.clone());
+            dek
+        }
+    };
     Ok(open(&dek, &nonce, aad, ciphertext)?)
 }
 

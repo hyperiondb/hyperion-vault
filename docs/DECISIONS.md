@@ -98,11 +98,33 @@ name avoids crates.io / extension-name collisions; the short `vault` schema
 keeps the SQL API ergonomic. Rename the schema if it would clash with another
 installed `vault` extension in the same database.
 
-## 10. Exact-pinned latest dependency versions
+## 10. Cache unwrapped data keys (not plaintext) for KMS-outage resilience
 
-**Decision.** Every dependency is pinned to an exact `=x.y.z` of the latest
-published version (e.g. `axum = "=0.8.9"`, `sha2 = "=0.11.0"`).
+**Decision.** The API keeps an in-memory cache of **unwrapped DEKs**, keyed by
+the wrapped-DEK bytes, with a TTL from `VAULT_DEK_CACHE_TTL_SECS` (default 300s;
+`0` disables).
 
-**Why.** Reproducible builds and no silent drift across the monorepo. `pgrx`
-and `libc` match `pg_replica` exactly so both extensions are built against the
-same toolchain.
+**Why.** AWS KMS can rate-limit or briefly fail. Without a cache every read is a
+KMS `Decrypt`, so a KMS outage takes down all reads. Caching the *unwrapped DEK*
+(rather than the plaintext secret) lets reads of any previously-read version
+continue through an outage while still requiring the AEAD `open` step and never
+storing the secret value itself in the cache.
+
+**Trade-off.** Cached DEKs live in process memory for up to the TTL, widening
+the window in which a memory compromise could decrypt those versions. Operators
+trade confidentiality window against read availability by tuning the TTL; set
+`0` for maximum confidentiality (every read hits KMS). Entries are zeroized on
+eviction. Writes always call KMS and therefore fail closed during an outage.
+
+## 11. Retry KMS calls with exponential backoff
+
+**Decision.** A `RetryingKms` decorator retries both KMS operations up to
+`VAULT_KMS_MAX_RETRIES` (default 5; `0` disables) with exponential backoff
+(100ms doubling, capped).
+
+**Why.** Writes always call `GenerateDataKey`, so a KMS rate-limit or transient
+error would otherwise fail every create/update/rotate. Retrying with backoff
+rides out throttling and brief outages. Reads retry too, but only on a cache
+miss (the DEK cache absorbs most read load). The decorator wraps any provider,
+so the local dev provider is unaffected in practice (it does not fail
+transiently).
