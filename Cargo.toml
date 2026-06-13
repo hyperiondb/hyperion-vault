@@ -8,10 +8,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-authors = ["Tadas Talaikis <talaikis.tadas@gmail.com>"]
+authors = ["Tadas Talaikis <info@nordlet.com>"]
 repository = "https://github.com/hyperiondb/hyperion-vault"
 homepage="https://hyperiondb.eu/"
 readme = "README.md"
@@ -33,8 +33,8 @@ subtle = "=2.6.1"
 base64 = "=0.22.1"
 ipnet = "=2.12.0"
 anyhow = "=1.0.102"
-hyperion-vault-core = { path = "crates/hyperion-vault-core", version = "=0.2.0" }
-hyperion-vault-api = { path = "crates/hyperion-vault-api", version = "=0.2.0" }
+hyperion-vault-core = { path = "crates/hyperion-vault-core", version = "=0.3.0" }
+hyperion-vault-api = { path = "crates/hyperion-vault-api", version = "=0.3.0" }
 
 [profile.dev]
 panic = "unwind"

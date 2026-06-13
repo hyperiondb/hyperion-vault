@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Encrypted secrets vault for PostgreSQL: KMS envelope encryption, REST API, automatic rotation"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "lib"]

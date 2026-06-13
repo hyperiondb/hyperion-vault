@@ -40,7 +40,7 @@ cat > "${PKGROOT}/DEBIAN/control" <<EOF
 Package: ${PKG}
 Version: ${VERSION}
 Architecture: ${ARCH}
-Maintainer: Tadas Talaikis <talaikis.tadas@gmail.com>
+Maintainer: Tadas Talaikis <info@nordlet.com>
 Section: database
 Priority: optional
 Depends: postgresql-${PG_MAJOR}

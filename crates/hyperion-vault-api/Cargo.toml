@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "REST API for hyperion-vault: secret CRUD, rotation, KMS envelope encryption, primary-aware write routing"
+publish = false
 
 [[bin]]
 name = "hyperion-vault-api"
