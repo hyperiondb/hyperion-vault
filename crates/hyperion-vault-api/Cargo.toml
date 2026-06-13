@@ -1,0 +1,35 @@
+[package]
+name = "hyperion-vault-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "REST API for hyperion-vault: secret CRUD, rotation, KMS envelope encryption, primary-aware write routing"
+
+[[bin]]
+name = "hyperion-vault-api"
+path = "src/main.rs"
+
+[dependencies]
+hyperion-vault-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+base64.workspace = true
+axum = "=0.8.9"
+async-trait = "=0.1.89"
+tower-http = { version = "=0.6.11", features = ["trace", "limit"] }
+tokio-postgres = "=0.7.18"
+deadpool-postgres = "=0.14.1"
+aws-config = "=1.8.18"
+aws-sdk-kms = "=1.111.0"
+
+[dev-dependencies]
+hyper = { version = "=1.10.1", features = ["client"] }
+http-body-util = "=0.1.3"
+tower = { version = "=0.5.3", features = ["util"] }

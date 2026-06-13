@@ -1,0 +1,7 @@
+target/
+**/target/
+.git/
+.pgrx/
+data/
+*.log
+*.so

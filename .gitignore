@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+Cargo.lock
+*.so
+.pgrx/
+/data/
+*.log
+.DS_Store
+.env
+docker/.env
+dist/

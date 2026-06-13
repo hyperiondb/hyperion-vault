@@ -1,0 +1,67 @@
+name: hyperion-vault-dev
+
+services:
+  db:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: hyperion-vault:local
+    container_name: hv-db
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=hyperion_vault
+      - -c
+      - log_statement=none
+      - -c
+      - log_min_duration_statement=-1
+      - -c
+      - log_parameter_max_length=0
+      - -c
+      - log_parameter_max_length_on_error=0
+    environment:
+      POSTGRES_PASSWORD: ${SU_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+      VAULT_SERVICE_PASSWORD: ${VAULT_SERVICE_PASSWORD:-vault_service_pw}
+      VAULT_ADMIN_TOKEN: ${VAULT_ADMIN_TOKEN:-dev-admin-token-change-me}
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - dbdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    networks: [vault]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  vault-api:
+    image: hyperion-vault:local
+    container_name: hv-api
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["hyperion-vault-api"]
+    environment:
+      VAULT_API_LISTEN: "0.0.0.0:8200"
+      VAULT_ALLOWED_IPS: ${VAULT_ALLOWED_IPS:-0.0.0.0/0}
+      VAULT_TRUST_PROXY: "false"
+      VAULT_PG_HOSTS: db
+      VAULT_PG_PORT: "5432"
+      VAULT_PG_USER: vault_service
+      VAULT_PG_PASSWORD: ${VAULT_SERVICE_PASSWORD:-vault_service_pw}
+      VAULT_PG_DBNAME: postgres
+      VAULT_KMS_MODE: local
+      VAULT_LOCAL_MASTER_KEY: ${VAULT_LOCAL_MASTER_KEY:?set VAULT_LOCAL_MASTER_KEY in docker/.env}
+      VAULT_ROTATION_POLL_SECS: "10"
+      RUST_LOG: ${RUST_LOG:-info}
+    ports: ["8200:8200"]
+    networks: [vault]
+    restart: unless-stopped
+
+volumes:
+  dbdata:
+
+networks:
+  vault:
+    driver: bridge

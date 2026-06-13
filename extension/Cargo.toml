@@ -1,0 +1,23 @@
+[package]
+name = "hyperion_vault"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Encrypted secrets vault for PostgreSQL: KMS envelope encryption, REST API, automatic rotation"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = ["pg18"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg_test = []
+
+[dependencies]
+pgrx = "=0.18.1"
+libc = "=0.2.186"
+
+[dev-dependencies]
+pgrx-tests = "=0.18.1"
