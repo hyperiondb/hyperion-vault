@@ -33,8 +33,8 @@ subtle = "=2.6.1"
 base64 = "=0.22.1"
 ipnet = "=2.12.0"
 anyhow = "=1.0.102"
-hyperion-vault-core = { path = "crates/hyperion-vault-core" }
-hyperion-vault-api = { path = "crates/hyperion-vault-api" }
+hyperion-vault-core = { path = "crates/hyperion-vault-core", version = "=0.1.0" }
+hyperion-vault-api = { path = "crates/hyperion-vault-api", version = "=0.1.0" }
 
 [profile.dev]
 panic = "unwind"
