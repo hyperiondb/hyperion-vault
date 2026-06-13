@@ -1,0 +1,30 @@
+name: pgxn
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: bundle + release to PGXN
+    runs-on: ubuntu-24.04
+    container: pgxn/pgxn-tools
+    steps:
+      - uses: actions/checkout@v4
+      - name: trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: verify tag matches META.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          meta="$(grep -m1 '"version"' META.json | sed -E 's/.*"version"[^"]*"([^"]+)".*/\1/')"
+          test "$tag" = "$meta" || { echo "git tag ($tag) != META.json version ($meta)" >&2; exit 1; }
+      - name: validate + bundle
+        run: pgxn-bundle
+      - name: release on PGXN
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: pgxn-release
