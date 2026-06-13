@@ -53,7 +53,7 @@ services:
     environment:
       <<: *node-env
       NODE_ID: "1"
-    volumes: [node1data:/var/lib/postgresql/data, node1raft:/var/lib/postgresql/raft]
+    volumes: [node1pg:/var/lib/postgresql]
     ports: ["5432:5432"]
 
   node2:
@@ -63,7 +63,7 @@ services:
     environment:
       <<: *node-env
       NODE_ID: "2"
-    volumes: [node2data:/var/lib/postgresql/data, node2raft:/var/lib/postgresql/raft]
+    volumes: [node2pg:/var/lib/postgresql]
     ports: ["5433:5432"]
 
   node3:
@@ -73,7 +73,7 @@ services:
     environment:
       <<: *node-env
       NODE_ID: "3"
-    volumes: [node3data:/var/lib/postgresql/data, node3raft:/var/lib/postgresql/raft]
+    volumes: [node3pg:/var/lib/postgresql]
     ports: ["5434:5432"]
 
   api1:
@@ -107,12 +107,9 @@ services:
     ports: ["8202:8200"]
 
 volumes:
-  node1data:
-  node2data:
-  node3data:
-  node1raft:
-  node2raft:
-  node3raft:
+  node1pg:
+  node2pg:
+  node3pg:
 
 networks:
   vault:

@@ -26,6 +26,9 @@ pub struct Config {
     pub dek_cache_ttl_secs: u64,
     pub kms_max_retries: u32,
     pub node_name: String,
+    pub auth_max_failures: u32,
+    pub auth_lockout_secs: i64,
+    pub auth_window_secs: i64,
 }
 
 impl Config {
@@ -88,6 +91,15 @@ impl Config {
                 .parse()
                 .context("VAULT_KMS_MAX_RETRIES must be an integer (0 disables retries)")?,
             node_name: env_or("VAULT_NODE_NAME", &hostname_fallback()),
+            auth_max_failures: env_or("VAULT_AUTH_MAX_FAILURES", "5")
+                .parse()
+                .context("VAULT_AUTH_MAX_FAILURES must be an integer (0 disables lockout)")?,
+            auth_lockout_secs: env_or("VAULT_AUTH_LOCKOUT_SECS", "900")
+                .parse()
+                .context("VAULT_AUTH_LOCKOUT_SECS must be an integer (seconds a lockout lasts)")?,
+            auth_window_secs: env_or("VAULT_AUTH_WINDOW_SECS", "300").parse().context(
+                "VAULT_AUTH_WINDOW_SECS must be an integer (failure accumulation window)",
+            )?,
         })
     }
 }

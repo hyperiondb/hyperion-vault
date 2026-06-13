@@ -1,3 +1,4 @@
+pub mod authz;
 pub mod cache;
 pub mod config;
 pub mod db;
@@ -5,6 +6,8 @@ pub mod dto;
 pub mod error;
 pub mod guards;
 pub mod kms;
+pub mod lockout;
+pub mod manage;
 pub mod rotation_worker;
 pub mod routes;
 pub mod service;
@@ -52,6 +55,17 @@ pub async fn build_state(cfg: &Config) -> anyhow::Result<SharedState> {
         );
     }
 
+    if cfg.auth_max_failures > 0 {
+        tracing::info!(
+            max_failures = cfg.auth_max_failures,
+            lockout_secs = cfg.auth_lockout_secs,
+            window_secs = cfg.auth_window_secs,
+            "auth lockout enabled (cluster-wide)"
+        );
+    } else {
+        tracing::warn!("auth lockout disabled (VAULT_AUTH_MAX_FAILURES=0)");
+    }
+
     Ok(Arc::new(AppState {
         db,
         kms,
@@ -59,6 +73,9 @@ pub async fn build_state(cfg: &Config) -> anyhow::Result<SharedState> {
         allowlist,
         trust_proxy: cfg.trust_proxy,
         node_name: cfg.node_name.clone(),
+        auth_max_failures: cfg.auth_max_failures,
+        auth_lockout_secs: cfg.auth_lockout_secs,
+        auth_window_secs: cfg.auth_window_secs,
     }))
 }
 

@@ -16,9 +16,22 @@ BEGIN
 END
 $bootstrap$;
 
+CREATE TABLE IF NOT EXISTS vault.roles (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        text NOT NULL UNIQUE,
+    description text,
+    is_admin    boolean NOT NULL DEFAULT false,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO vault.roles (name, description, is_admin)
+VALUES ('admin', 'Full superuser: manage roles/tokens and all secrets', true)
+ON CONFLICT (name) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS vault.admin_tokens (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name          text NOT NULL UNIQUE,
+    role_id       uuid REFERENCES vault.roles(id) ON DELETE RESTRICT,
     token_sha256  bytea NOT NULL UNIQUE,
     created_at    timestamptz NOT NULL DEFAULT now(),
     last_used_at  timestamptz,
@@ -26,10 +39,27 @@ CREATE TABLE IF NOT EXISTS vault.admin_tokens (
     CONSTRAINT admin_tokens_fingerprint_len CHECK (octet_length(token_sha256) = 32)
 );
 
+CREATE TABLE IF NOT EXISTS vault.role_permissions (
+    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    role_id      uuid NOT NULL REFERENCES vault.roles(id) ON DELETE CASCADE,
+    action       text NOT NULL CHECK (action IN ('create', 'update', 'delete', 'rotate', '*')),
+    path_pattern text NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS role_permissions_role_idx ON vault.role_permissions (role_id);
+
+CREATE TABLE IF NOT EXISTS vault.auth_lockouts (
+    client_ip    inet PRIMARY KEY,
+    failures     integer NOT NULL DEFAULT 0,
+    window_start timestamptz NOT NULL DEFAULT now(),
+    locked_until timestamptz
+);
+
 CREATE TABLE IF NOT EXISTS vault.secrets (
     id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name               text NOT NULL UNIQUE,
     kind               vault.secret_kind NOT NULL,
+    format             text NOT NULL DEFAULT 'opaque' CHECK (format IN ('opaque', 'userpass')),
     description        text,
     rotation_interval  interval,
     grace_period       interval NOT NULL DEFAULT '0 seconds',
@@ -86,6 +116,12 @@ CREATE INDEX IF NOT EXISTS audit_log_at_idx ON vault.audit_log (at DESC);
 REVOKE ALL ON SCHEMA vault FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA vault FROM PUBLIC;
 
+ALTER TABLE vault.roles            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vault.roles            FORCE  ROW LEVEL SECURITY;
+ALTER TABLE vault.role_permissions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vault.role_permissions FORCE  ROW LEVEL SECURITY;
+ALTER TABLE vault.auth_lockouts    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vault.auth_lockouts    FORCE  ROW LEVEL SECURITY;
 ALTER TABLE vault.admin_tokens     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vault.admin_tokens     FORCE  ROW LEVEL SECURITY;
 ALTER TABLE vault.secrets          ENABLE ROW LEVEL SECURITY;
@@ -106,7 +142,7 @@ BEGIN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA vault TO %I', role_name);
     EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA vault TO %I', role_name);
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA vault TO %I', role_name);
-    FOREACH tbl IN ARRAY ARRAY['secrets', 'secret_versions', 'admin_tokens', 'rotation_jobs', 'audit_log']
+    FOREACH tbl IN ARRAY ARRAY['secrets', 'secret_versions', 'admin_tokens', 'rotation_jobs', 'audit_log', 'roles', 'role_permissions', 'auth_lockouts']
     LOOP
         EXECUTE format('DROP POLICY IF EXISTS vault_service_rw ON vault.%I', tbl);
         EXECUTE format(
@@ -152,6 +188,55 @@ RETURNS jsonb LANGUAGE sql AS $status$
         'grace_versions',     (SELECT count(*) FROM vault.secret_versions WHERE expires_at IS NOT NULL)
     );
 $status$;
+
+CREATE OR REPLACE FUNCTION vault.add_token(p_name text, p_role text, p_sha256 bytea)
+RETURNS void LANGUAGE plpgsql AS $addtok$
+DECLARE
+    rid uuid;
+BEGIN
+    SELECT id INTO rid FROM vault.roles WHERE name = p_role;
+    IF rid IS NULL THEN
+        RAISE EXCEPTION 'role % does not exist', p_role;
+    END IF;
+    INSERT INTO vault.admin_tokens (name, role_id, token_sha256)
+    VALUES (p_name, rid, p_sha256);
+END
+$addtok$;
+
+CREATE OR REPLACE FUNCTION vault.record_auth_failure(
+    p_ip inet, p_max integer, p_window_secs bigint, p_lockout_secs bigint)
+RETURNS void LANGUAGE plpgsql AS $rec$
+DECLARE
+    cur_failures integer;
+    cur_window   timestamptz;
+    new_failures integer;
+BEGIN
+    SELECT failures, window_start INTO cur_failures, cur_window
+    FROM vault.auth_lockouts WHERE client_ip = p_ip FOR UPDATE;
+
+    IF NOT FOUND THEN
+        INSERT INTO vault.auth_lockouts (client_ip, failures, window_start, locked_until)
+        VALUES (p_ip, 1, now(),
+            CASE WHEN 1 >= p_max THEN now() + make_interval(secs => p_lockout_secs) ELSE NULL END);
+        RETURN;
+    END IF;
+
+    IF cur_window < now() - make_interval(secs => p_window_secs) THEN
+        UPDATE vault.auth_lockouts
+        SET failures = 1, window_start = now(),
+            locked_until = CASE WHEN 1 >= p_max
+                THEN now() + make_interval(secs => p_lockout_secs) ELSE NULL END
+        WHERE client_ip = p_ip;
+    ELSE
+        new_failures := cur_failures + 1;
+        UPDATE vault.auth_lockouts
+        SET failures = new_failures,
+            locked_until = CASE WHEN new_failures >= p_max
+                THEN now() + make_interval(secs => p_lockout_secs) ELSE locked_until END
+        WHERE client_ip = p_ip;
+    END IF;
+END
+$rec$;
 "#,
     name = "vault_bootstrap",
 );

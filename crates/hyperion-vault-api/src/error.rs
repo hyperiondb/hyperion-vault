@@ -7,6 +7,7 @@ use serde_json::json;
 pub enum ApiError {
     Unauthorized,
     Forbidden,
+    TooManyRequests,
     NotFound,
     BadRequest(String),
     Conflict(String),
@@ -18,6 +19,10 @@ impl ApiError {
         match self {
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
+            ApiError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many failed attempts; locked out".to_string(),
+            ),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),

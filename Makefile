@@ -20,7 +20,7 @@ test-core:
 	cargo test -p hyperion-vault-core
 
 test-security:
-	cargo test -p hyperion-vault-core --test crypto_security --test auth_security --test ip_allowlist_security --test rotation_policy
+	cargo test -p hyperion-vault-core --test crypto_security --test auth_security --test ip_allowlist_security --test rotation_policy --test rbac_security
 
 test:
 	cargo test -p hyperion-vault-core -p hyperion-vault-api -p hyperion-vault

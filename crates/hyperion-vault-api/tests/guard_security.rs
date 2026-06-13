@@ -26,6 +26,9 @@ fn test_config(allowed_ips: &str) -> Config {
         dek_cache_ttl_secs: 0,
         kms_max_retries: 0,
         node_name: "test".to_string(),
+        auth_max_failures: 0,
+        auth_lockout_secs: 900,
+        auth_window_secs: 300,
     }
 }
 

@@ -40,12 +40,11 @@
 | **Nonce reuse** weakening AEAD | 192-bit random XChaCha20 nonces, fresh per version; uniqueness covered by tests. |
 | **Key material in memory** after use | `Zeroizing` DEKs/master keys. The DEK cache holds unwrapped keys for up to `VAULT_DEK_CACHE_TTL_SECS` (never plaintext); lower or disable the TTL to shrink the window. |
 
-## Residual risks / open items (must close before production)
+## Residual risks / open items
 
 - **TLS to Postgres** is not enabled in the scaffold (`NoTls`).
 - **API TLS** termination must be added (proxy or in-process).
 - **Admin-token bootstrap** flow (initial token provisioning) is operator-defined.
 - A **KMS outage** makes reads/writes fail closed (availability vs
-  confidentiality trade-off) — consider caching policy explicitly.
+  confidentiality trade-off) — adjust caching to avoid rate limits
 - The IP allowlist is **IPv4-only** by spec; IPv6 clients are denied.
-- Rate limiting / lockout on repeated failed auth is **not** implemented.

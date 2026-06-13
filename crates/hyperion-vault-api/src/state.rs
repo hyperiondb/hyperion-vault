@@ -13,6 +13,9 @@ pub struct AppState {
     pub allowlist: IpAllowlist,
     pub trust_proxy: bool,
     pub node_name: String,
+    pub auth_max_failures: u32,
+    pub auth_lockout_secs: i64,
+    pub auth_window_secs: i64,
 }
 
 pub type SharedState = Arc<AppState>;

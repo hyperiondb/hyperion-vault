@@ -57,10 +57,3 @@ fingerprint). Generate with `hyperion_vault_core::auth::generate_token()`, store
 `sha256(token)` in `vault.admin_tokens`, distribute the token over a secure
 channel, and `UPDATE ... SET revoked_at = now()` to revoke. The plaintext token
 is never persisted.
-
-## Reporting
-
-This is a scaffold; before production use, complete the items in
-[`THREAT_MODEL.md`](THREAT_MODEL.md) marked as open, run the security test
-suite (`scripts/test-security.sh`), and have the crypto and access paths
-reviewed.

@@ -42,9 +42,15 @@ Status: **in progress**
 - **IP allowlist for reads.** Secret reads are permitted only from an
   IPv4/CIDR allowlist supplied via `VAULT_ALLOWED_IPS`. **Fail-closed**: an
   empty allowlist denies all reads.
-- **Admin token auth for management.** `create/update/delete/rotate` require an
-  admin bearer token. Tokens are stored only as SHA-256 fingerprints and
-  checked in constant time.
+- **Role-based access control (RBAC).** `create/update/delete/rotate` and
+  role/token administration require a bearer token. Each token maps to a
+  **role** whose permission rules are `action × secret-path glob` — e.g. a
+  `payment` role scoped to `stripe/*` — with a built-in `admin` superuser role
+  that manages roles and tokens. Tokens are stored only as SHA-256 fingerprints
+  and checked in constant time. Reads stay IP-allowlisted (not RBAC-gated).
+- **Brute-force lockout.** Auth/authz failures are counted per client IP
+  **cluster-wide** (in Postgres); after `VAULT_AUTH_MAX_FAILURES` the IP is
+  locked out (HTTP `429`) for `VAULT_AUTH_LOCKOUT_SECS`.
 - **Automatic rotation.** An in-database background worker (running only on the
   primary) enqueues due rotations and `NOTIFY`s; the API's rotation worker
   performs the re-encryption and expires superseded versions after grace.
@@ -109,16 +115,17 @@ Vault leverages this directly:
 cargo test -p hyperion-vault-core
 
 # 2. Build the pg_replica cluster image first (sibling repo)
-cd ../pg_replica && docker compose -f docker/docker-compose.yml build
+cd pg_replica && docker compose -f docker/docker-compose.yml build
 
 # 3. Bring up a 3-node cluster with vault + an API sidecar on each node
-cd ../vault/docker && cp .env.example .env && docker compose up --build
+cd docker && cp .env.example .env && docker compose up --build
 
 # 4. Run the end-to-end suite (CRUD, auth, replicated reads, rotation)
 bash scripts/e2e.sh        # from the repo root
 ```
 
 APIs listen on `localhost:8200` (node1), `:8201` (node2), `:8202` (node3). See
+
 [`docs/API.md`](docs/API.md) for full request/response examples and
 [`docker/`](docker/) for the cluster topology.
 
@@ -157,6 +164,9 @@ curl -sS -X POST localhost:8200/v1/secrets \
 | `VAULT_ROTATION_POLL_SECS` | `15` | How often the API worker claims rotation jobs. |
 | `VAULT_DEK_CACHE_TTL_SECS` | `300` | TTL of the in-memory decrypted-DEK cache; lets previously-read secrets survive a KMS outage. `0` disables. |
 | `VAULT_KMS_MAX_RETRIES` | `5` | Retry KMS calls (writes always; reads on a cache miss) up to N times with exponential backoff, to ride out rate-limits/brief outages. `0` disables. |
+| `VAULT_AUTH_MAX_FAILURES` | `5` | Failed auth/authz attempts (per client IP) before lockout. `0` disables the lockout. |
+| `VAULT_AUTH_LOCKOUT_SECS` | `900` | How long a locked-out IP stays locked (auto-expires). |
+| `VAULT_AUTH_WINDOW_SECS` | `300` | Window over which failures accumulate toward `VAULT_AUTH_MAX_FAILURES`. |
 
 The extension is configured via GUCs: `hyperion_vault.rotation_enabled`,
 `hyperion_vault.scan_interval_secs`, `hyperion_vault.database`.
@@ -164,10 +174,6 @@ The extension is configured via GUCs: `hyperion_vault.rotation_enabled`,
 ---
 
 ## Install (Debian/Ubuntu)
-
-A `[cd]`-tagged commit (or a manual workflow run) builds a signed apt repo on
-GitHub Pages via `.github/workflows/packages.yml`. The `.deb` ships the
-extension and the `hyperion-vault-api` binary (`/usr/bin/hyperion-vault-api`):
 
 ```bash
 curl -fsSL https://hyperiondb.github.io/hyperion-vault/install.sh | sudo bash
@@ -179,10 +185,17 @@ sudo apt-get install -y postgresql-18-hyperion-vault
 ## Security
 
 This is security-critical software. Read [`docs/SECURITY.md`](docs/SECURITY.md)
-and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before deploying. TLS to
-Postgres is **not** enabled by default in this scaffold and must be configured
-for production.
+and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before deploying.
+
+## Docs
+
+- [docs/DECISIONS.md](docs/DECISIONS.md) - decisions
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - architecture
+- [docs/SECURITY.md](docs/SECURITY.md) - Security
+- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) - Threat model
+- [docs/API.md](docs/API.md) - REST API
 
 ## License
 
 GPL-3.0-or-later. See [`LICENCE`](LICENCE).
+fdebiam

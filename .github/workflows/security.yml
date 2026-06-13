@@ -29,4 +29,5 @@ jobs:
             --test crypto_security \
             --test auth_security \
             --test ip_allowlist_security \
-            --test rotation_policy
+            --test rotation_policy \
+            --test rbac_security

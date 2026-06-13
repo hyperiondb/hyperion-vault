@@ -7,7 +7,8 @@ cargo test -p hyperion-vault-core \
   --test crypto_security \
   --test auth_security \
   --test ip_allowlist_security \
-  --test rotation_policy
+  --test rotation_policy \
+  --test rbac_security
 
 if command -v cargo-audit >/dev/null 2>&1; then
   echo "== cargo audit =="

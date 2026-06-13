@@ -5,9 +5,15 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 
 use crate::error::ApiError;
+use crate::lockout;
 use crate::state::SharedState;
 
-pub struct AdminActor(pub String);
+pub struct AdminActor {
+    pub name: String,
+    pub is_admin: bool,
+    pub rules: Vec<(String, String)>,
+    pub client_ip: Option<IpAddr>,
+}
 
 impl FromRequestParts<SharedState> for AdminActor {
     type Rejection = ApiError;
@@ -16,20 +22,50 @@ impl FromRequestParts<SharedState> for AdminActor {
         parts: &mut Parts,
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
-        let token = bearer_token(parts).ok_or(ApiError::Unauthorized)?;
+        let ip = client_ip(parts, state.trust_proxy);
+        lockout::check(state, ip).await?;
+
+        let token = match bearer_token(parts) {
+            Some(token) => token,
+            None => {
+                lockout::record(state, ip).await;
+                return Err(ApiError::Unauthorized);
+            }
+        };
         let fingerprint = hyperion_vault_core::auth::fingerprint(&token).to_vec();
 
         let client = state.db.reader().await?;
         let row = client
             .query_opt(
-                "SELECT name FROM vault.admin_tokens WHERE token_sha256 = $1 AND revoked_at IS NULL",
+                "SELECT t.name, COALESCE(r.is_admin, false), t.role_id::text \
+                 FROM vault.admin_tokens t \
+                 LEFT JOIN vault.roles r ON r.id = t.role_id \
+                 WHERE t.token_sha256 = $1 AND t.revoked_at IS NULL",
                 &[&fingerprint],
             )
             .await?;
 
-        let name: String = match row {
-            Some(row) => row.get(0),
-            None => return Err(ApiError::Unauthorized),
+        let (name, is_admin, role_id): (String, bool, Option<String>) = match row {
+            Some(row) => (row.get(0), row.get(1), row.get(2)),
+            None => {
+                lockout::record(state, ip).await;
+                return Err(ApiError::Unauthorized);
+            }
+        };
+
+        let rules = match &role_id {
+            Some(role_id) => {
+                let rows = client
+                    .query(
+                        "SELECT action, path_pattern FROM vault.role_permissions WHERE role_id = $1::uuid",
+                        &[role_id],
+                    )
+                    .await?;
+                rows.iter()
+                    .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+                    .collect()
+            }
+            None => Vec::new(),
         };
 
         if let Ok(writer) = state.db.writer().await {
@@ -41,7 +77,12 @@ impl FromRequestParts<SharedState> for AdminActor {
                 .await;
         }
 
-        Ok(AdminActor(name))
+        Ok(AdminActor {
+            name,
+            is_admin,
+            rules,
+            client_ip: ip,
+        })
     }
 }
 
@@ -57,9 +98,13 @@ impl FromRequestParts<SharedState> for ReaderGuard {
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
         let ip = client_ip(parts, state.trust_proxy).ok_or(ApiError::Forbidden)?;
+        lockout::check_ip(state, ip).await?;
         match ip {
             IpAddr::V4(v4) if state.allowlist.contains(v4) => Ok(ReaderGuard { client_ip: v4 }),
-            _ => Err(ApiError::Forbidden),
+            _ => {
+                lockout::record(state, Some(ip)).await;
+                Err(ApiError::Forbidden)
+            }
         }
     }
 }
