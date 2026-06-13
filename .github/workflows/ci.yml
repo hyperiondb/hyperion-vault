@@ -38,6 +38,11 @@ jobs:
         run: cargo install --locked cargo-pgrx --version 0.18.1
       - name: pgrx init
         run: cargo pgrx init --pg18 "$(command -v pg_config)"
+      - name: grant runner write access to PG install dirs
+        run: |
+          sudo chown -R "$(id -un):$(id -gn)" \
+            "$(pg_config --sharedir)/extension" \
+            "$(pg_config --pkglibdir)"
       - name: pgrx test
         working-directory: extension
         run: cargo pgrx test --no-default-features --features pg18

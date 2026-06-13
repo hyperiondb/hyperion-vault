@@ -27,7 +27,7 @@ tower-http = { version = "=0.6.11", features = ["trace", "limit"] }
 tokio-postgres = "=0.7.18"
 deadpool-postgres = "=0.14.1"
 aws-config = "=1.8.18"
-aws-sdk-kms = "=1.111.0"
+aws-sdk-kms = { version = "=1.111.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 
 [dev-dependencies]
 hyper = { version = "=1.10.1", features = ["client"] }
