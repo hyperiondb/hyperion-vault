@@ -1,7 +1,8 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::anyhow;
 use tokio_postgres::error::SqlState;
+use zeroize::Zeroizing;
 
 use hyperion_vault_core::auth;
 use hyperion_vault_core::crypto::{generate_nonce, open, seal, Dek, NONCE_LEN};
@@ -12,6 +13,7 @@ use crate::dto::{
     CreateSecretRequest, SecretMetadata, SecretValue, UpdateSecretRequest, UserPass, VerifyResponse,
 };
 use crate::error::{ApiError, ApiResult};
+use crate::lockout;
 use crate::state::AppState;
 
 const MAX_NAME_LEN: usize = 255;
@@ -133,14 +135,17 @@ pub async fn get_secret(
     let aad: Vec<u8> = row.get(7);
     let created_at: String = row.get(8);
 
-    let expected_aad = aad_for(name, version);
-    if aad != expected_aad {
-        return Err(ApiError::Internal(anyhow!(
-            "stored aad does not match secret identity (possible tampering)"
-        )));
-    }
-
-    let plaintext = open_version(state, &key_id, &wrapped, &nonce, &aad, &ciphertext).await?;
+    let plaintext = open_version(
+        state,
+        name,
+        version,
+        &key_id,
+        &wrapped,
+        &nonce,
+        &aad,
+        &ciphertext,
+    )
+    .await?;
     let (value, username, password) = decode_payload(format, plaintext)?;
 
     audit(state, None, Some(client_ip), "get", Some(name), "ok").await;
@@ -260,7 +265,7 @@ pub async fn update_secret(
                 value.into_bytes()
             }
             SecretFormat::Userpass => {
-                let current = load_userpass(state, &tx, &id, current_version).await?;
+                let current = load_userpass(state, &tx, name, &id, current_version).await?;
                 let username = req.username.clone().unwrap_or(current.username);
                 let password = req.password.clone().unwrap_or(current.password);
                 validate_field("username", &username)?;
@@ -376,7 +381,7 @@ pub async fn rotate(
             }
         }
         SecretFormat::Userpass => {
-            let current = load_userpass(state, &tx, &id, current_version).await?;
+            let current = load_userpass(state, &tx, name, &id, current_version).await?;
             let password = auth::generate_token();
             let bytes = encode_userpass(&current.username, &password);
             Payload {
@@ -456,7 +461,17 @@ pub async fn verify(
         let ciphertext: Vec<u8> = row.get(5);
         let aad: Vec<u8> = row.get(6);
 
-        let plaintext = open_version(state, &key_id, &wrapped, &nonce, &aad, &ciphertext).await?;
+        let plaintext = open_version(
+            state,
+            name,
+            version,
+            &key_id,
+            &wrapped,
+            &nonce,
+            &aad,
+            &ciphertext,
+        )
+        .await?;
         let matches = match format {
             SecretFormat::Opaque => auth::fingerprints_match(presented.as_bytes(), &plaintext),
             SecretFormat::Userpass => match decode_userpass(&plaintext) {
@@ -483,6 +498,7 @@ pub async fn verify(
         "invalid",
     )
     .await;
+    lockout::record(state, Some(IpAddr::V4(client_ip))).await;
     Ok(VerifyResponse {
         valid: false,
         version: None,
@@ -560,12 +576,13 @@ fn decode_userpass(bytes: &[u8]) -> ApiResult<UserPass> {
 
 fn decode_payload(
     format: SecretFormat,
-    plaintext: Vec<u8>,
+    plaintext: Zeroizing<Vec<u8>>,
 ) -> ApiResult<(Option<String>, Option<String>, Option<String>)> {
     match format {
         SecretFormat::Opaque => {
-            let value = String::from_utf8(plaintext)
-                .map_err(|_| ApiError::Internal(anyhow!("decrypted value is not valid UTF-8")))?;
+            let value = std::str::from_utf8(&plaintext)
+                .map_err(|_| ApiError::Internal(anyhow!("decrypted value is not valid UTF-8")))?
+                .to_string();
             Ok((Some(value), None, None))
         }
         SecretFormat::Userpass => {
@@ -578,6 +595,7 @@ fn decode_payload(
 async fn load_userpass(
     state: &AppState,
     tx: &tokio_postgres::Transaction<'_>,
+    name: &str,
     secret_id: &str,
     version: i32,
 ) -> ApiResult<UserPass> {
@@ -593,7 +611,17 @@ async fn load_userpass(
     let nonce: Vec<u8> = row.get(2);
     let ciphertext: Vec<u8> = row.get(3);
     let aad: Vec<u8> = row.get(4);
-    let plaintext = open_version(state, &key_id, &wrapped, &nonce, &aad, &ciphertext).await?;
+    let plaintext = open_version(
+        state,
+        name,
+        version,
+        &key_id,
+        &wrapped,
+        &nonce,
+        &aad,
+        &ciphertext,
+    )
+    .await?;
     decode_userpass(&plaintext)
 }
 
@@ -604,7 +632,9 @@ async fn seal_version(
     plaintext: &[u8],
 ) -> ApiResult<Sealed> {
     let aad = aad_for(name, version);
-    let data_key = state.kms.generate_data_key().await?;
+    let version_str = version.to_string();
+    let context = [("secret", name), ("version", version_str.as_str())];
+    let data_key = state.kms.generate_data_key(&context).await?;
     let nonce = generate_nonce();
     let ciphertext = seal(&data_key.plaintext, &nonce, &aad, plaintext)?;
     Ok(Sealed {
@@ -616,26 +646,40 @@ async fn seal_version(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn open_version(
     state: &AppState,
+    name: &str,
+    version: i32,
     key_id: &str,
     wrapped: &[u8],
     nonce: &[u8],
-    aad: &[u8],
+    stored_aad: &[u8],
     ciphertext: &[u8],
-) -> ApiResult<Vec<u8>> {
+) -> ApiResult<Zeroizing<Vec<u8>>> {
+    let aad = aad_for(name, version);
+    if stored_aad != aad {
+        return Err(ApiError::Internal(anyhow!(
+            "stored aad does not match secret identity (possible tampering)"
+        )));
+    }
     let nonce: [u8; NONCE_LEN] = nonce
         .try_into()
         .map_err(|_| ApiError::Internal(anyhow!("stored nonce has invalid length")))?;
     let dek: Dek = match state.dek_cache.get(wrapped) {
         Some(dek) => dek,
         None => {
-            let dek = state.kms.decrypt_data_key(wrapped, key_id).await?;
+            let version_str = version.to_string();
+            let context = [("secret", name), ("version", version_str.as_str())];
+            let dek = state
+                .kms
+                .decrypt_data_key(wrapped, key_id, &context)
+                .await?;
             state.dek_cache.put(wrapped.to_vec(), dek.clone());
             dek
         }
     };
-    Ok(open(&dek, &nonce, aad, ciphertext)?)
+    Ok(open(&dek, &nonce, &aad, ciphertext)?)
 }
 
 async fn insert_version(
@@ -698,18 +742,39 @@ async fn audit(
     secret_name: Option<&str>,
     outcome: &str,
 ) {
-    let Ok(writer) = state.db.writer().await else {
-        tracing::warn!(action, "audit log skipped: no writer connection");
-        return;
-    };
     let ip_text = client_ip.map(|ip| ip.to_string());
-    let _ = writer
+    let writer = match state.db.writer().await {
+        Ok(writer) => writer,
+        Err(_) => {
+            tracing::warn!(
+                actor = ?actor,
+                client_ip = ?ip_text,
+                action,
+                secret_name = ?secret_name,
+                outcome,
+                "audit not persisted (no writer); recorded to log only"
+            );
+            return;
+        }
+    };
+    if let Err(err) = writer
         .execute(
             "INSERT INTO vault.audit_log (actor, client_ip, action, secret_name, outcome) \
              VALUES ($1, $2::inet, $3, $4, $5)",
             &[&actor, &ip_text, &action, &secret_name, &outcome],
         )
-        .await;
+        .await
+    {
+        tracing::warn!(
+            error = %err,
+            actor = ?actor,
+            client_ip = ?ip_text,
+            action,
+            secret_name = ?secret_name,
+            outcome,
+            "audit insert failed; recorded to log only"
+        );
+    }
 }
 
 fn parse_kind(value: String) -> ApiResult<SecretKind> {
@@ -790,7 +855,7 @@ mod tests {
     #[test]
     fn decode_payload_opaque_returns_value() {
         let (value, username, password) =
-            decode_payload(SecretFormat::Opaque, b"raw".to_vec()).expect("opaque");
+            decode_payload(SecretFormat::Opaque, Zeroizing::new(b"raw".to_vec())).expect("opaque");
         assert_eq!(value.as_deref(), Some("raw"));
         assert!(username.is_none() && password.is_none());
     }
@@ -799,7 +864,7 @@ mod tests {
     fn decode_payload_userpass_returns_pair() {
         let bytes = encode_userpass("bob", "pw");
         let (value, username, password) =
-            decode_payload(SecretFormat::Userpass, bytes).expect("userpass");
+            decode_payload(SecretFormat::Userpass, Zeroizing::new(bytes)).expect("userpass");
         assert!(value.is_none());
         assert_eq!(username.as_deref(), Some("bob"));
         assert_eq!(password.as_deref(), Some("pw"));

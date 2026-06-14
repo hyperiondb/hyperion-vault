@@ -134,7 +134,7 @@ ALTER TABLE vault.audit_log        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vault.audit_log        FORCE  ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION vault.grant_service_role(role_name text)
-RETURNS void LANGUAGE plpgsql AS $grant$
+RETURNS void LANGUAGE plpgsql SET search_path = pg_catalog, vault AS $grant$
 DECLARE
     tbl text;
 BEGIN
@@ -153,7 +153,7 @@ END
 $grant$;
 
 CREATE OR REPLACE FUNCTION vault.enqueue_due_rotations()
-RETURNS integer LANGUAGE sql AS $enqueue$
+RETURNS integer LANGUAGE sql SET search_path = pg_catalog, vault AS $enqueue$
     WITH inserted AS (
         INSERT INTO vault.rotation_jobs (secret_id)
         SELECT s.id
@@ -169,7 +169,7 @@ RETURNS integer LANGUAGE sql AS $enqueue$
 $enqueue$;
 
 CREATE OR REPLACE FUNCTION vault.expire_grace_versions()
-RETURNS integer LANGUAGE sql AS $expire$
+RETURNS integer LANGUAGE sql SET search_path = pg_catalog, vault AS $expire$
     WITH deleted AS (
         DELETE FROM vault.secret_versions
         WHERE expires_at IS NOT NULL AND expires_at <= now()
@@ -178,7 +178,7 @@ RETURNS integer LANGUAGE sql AS $expire$
 $expire$;
 
 CREATE OR REPLACE FUNCTION vault.status()
-RETURNS jsonb LANGUAGE sql AS $status$
+RETURNS jsonb LANGUAGE sql SET search_path = pg_catalog, vault AS $status$
     SELECT jsonb_build_object(
         'in_recovery',        pg_is_in_recovery(),
         'secrets',            (SELECT count(*) FROM vault.secrets),
@@ -190,7 +190,7 @@ RETURNS jsonb LANGUAGE sql AS $status$
 $status$;
 
 CREATE OR REPLACE FUNCTION vault.add_token(p_name text, p_role text, p_sha256 bytea)
-RETURNS void LANGUAGE plpgsql AS $addtok$
+RETURNS void LANGUAGE plpgsql SET search_path = pg_catalog, vault AS $addtok$
 DECLARE
     rid uuid;
 BEGIN
@@ -205,36 +205,34 @@ $addtok$;
 
 CREATE OR REPLACE FUNCTION vault.record_auth_failure(
     p_ip inet, p_max integer, p_window_secs bigint, p_lockout_secs bigint)
-RETURNS void LANGUAGE plpgsql AS $rec$
+RETURNS void LANGUAGE plpgsql SET search_path = pg_catalog, vault AS $rec$
 DECLARE
     cur_failures integer;
     cur_window   timestamptz;
     new_failures integer;
+    new_window   timestamptz;
 BEGIN
+    INSERT INTO vault.auth_lockouts (client_ip, failures, window_start, locked_until)
+    VALUES (p_ip, 0, now(), NULL)
+    ON CONFLICT (client_ip) DO NOTHING;
+
     SELECT failures, window_start INTO cur_failures, cur_window
     FROM vault.auth_lockouts WHERE client_ip = p_ip FOR UPDATE;
 
-    IF NOT FOUND THEN
-        INSERT INTO vault.auth_lockouts (client_ip, failures, window_start, locked_until)
-        VALUES (p_ip, 1, now(),
-            CASE WHEN 1 >= p_max THEN now() + make_interval(secs => p_lockout_secs) ELSE NULL END);
-        RETURN;
-    END IF;
-
     IF cur_window < now() - make_interval(secs => p_window_secs) THEN
-        UPDATE vault.auth_lockouts
-        SET failures = 1, window_start = now(),
-            locked_until = CASE WHEN 1 >= p_max
-                THEN now() + make_interval(secs => p_lockout_secs) ELSE NULL END
-        WHERE client_ip = p_ip;
+        new_failures := 1;
+        new_window := now();
     ELSE
         new_failures := cur_failures + 1;
-        UPDATE vault.auth_lockouts
-        SET failures = new_failures,
-            locked_until = CASE WHEN new_failures >= p_max
-                THEN now() + make_interval(secs => p_lockout_secs) ELSE locked_until END
-        WHERE client_ip = p_ip;
+        new_window := cur_window;
     END IF;
+
+    UPDATE vault.auth_lockouts
+    SET failures = new_failures,
+        window_start = new_window,
+        locked_until = CASE WHEN new_failures >= p_max
+            THEN now() + make_interval(secs => p_lockout_secs) ELSE locked_until END
+    WHERE client_ip = p_ip;
 END
 $rec$;
 "#,

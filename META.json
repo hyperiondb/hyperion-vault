@@ -2,7 +2,7 @@
    "name": "hyperion_vault",
    "abstract": "Encrypted secrets vault for PostgreSQL (KMS envelope encryption, REST API, automatic rotation)",
    "description": "hyperion_vault stores secrets encrypted at rest in PostgreSQL using envelope encryption: a per-version data key is wrapped by AWS KMS and the secret is sealed with XChaCha20-Poly1305, so only ciphertext, the wrapped key, and a nonce are ever written to disk or WAL. A co-located REST API creates, reads, updates, deletes, verifies, and automatically rotates secrets, with old versions kept valid for a configurable grace period. Designed to run on every member of a pg_replica cluster: reads are served locally on any node, writes are routed to the current primary, and the schema replicates byte-for-byte. Access to read secrets is restricted to an IPv4 allowlist; management operations require admin tokens.",
-   "version": "0.3.0",
+   "version": "0.4.0",
    "maintainer": [
       "Tadas Talaikis <info@nordlet.com>"
    ],
@@ -11,7 +11,7 @@
       "hyperion_vault": {
          "abstract": "Encrypted secrets vault for PostgreSQL",
          "file": "extension/hyperion_vault.control",
-         "version": "0.3.0"
+         "version": "0.4.0"
       }
    },
    "prereqs": {

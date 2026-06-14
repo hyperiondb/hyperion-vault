@@ -1,0 +1,49 @@
+services:
+  wireguard:
+    build:
+      context: ./wireguard
+      dockerfile: Dockerfile
+    image: hyperion-vault-wireguard:local
+    container_name: hv-wireguard
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.src_valid_mark: "1"
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./wireguard/wg0.conf:/etc/wireguard/wg0.conf:ro
+    ports:
+      - "51820:51820/udp"
+    depends_on: [api1, api2, api3]
+    restart: unless-stopped
+    networks:
+      vault:
+        ipv4_address: 172.30.0.2
+
+  api1:
+    environment:
+      VAULT_ALLOWED_IPS: "172.30.0.2/32"
+    networks:
+      vault:
+        ipv4_address: 172.30.0.11
+
+  api2:
+    environment:
+      VAULT_ALLOWED_IPS: "172.30.0.2/32"
+    networks:
+      vault:
+        ipv4_address: 172.30.0.12
+
+  api3:
+    environment:
+      VAULT_ALLOWED_IPS: "172.30.0.2/32"
+    networks:
+      vault:
+        ipv4_address: 172.30.0.13
+
+networks:
+  vault:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

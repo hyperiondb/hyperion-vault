@@ -42,9 +42,12 @@
 
 ## Residual risks / open items
 
-- **TLS to Postgres** is not enabled in the scaffold (`NoTls`).
-- **API TLS** termination must be added (proxy or in-process).
+- **TLS to Postgres** is not enabled in the scaffold (`NoTls`) (only if you are on same network)
+- **API TLS** termination must be added (proxy or in-process) (only if you are on same network)
 - **Admin-token bootstrap** flow (initial token provisioning) is operator-defined.
 - A **KMS outage** makes reads/writes fail closed (availability vs
   confidentiality trade-off) — adjust caching to avoid rate limits
 - The IP allowlist is **IPv4-only** by spec; IPv6 clients are denied.
+- **Auth lockout** is written on the primary but checked via the local/any
+  replica, so enforcement can trail a just-recorded lockout by the replication
+  delay; kept on the read pool deliberately so reads survive a primary outage.

@@ -12,3 +12,5 @@ dist/
 *.asc
 *.pem
 *.key
+docker/wireguard/wg0.conf
+docker/wireguard/clients/

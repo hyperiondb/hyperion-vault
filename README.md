@@ -194,6 +194,7 @@ and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before deploying.
 - [docs/SECURITY.md](docs/SECURITY.md) - Security
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) - Threat model
 - [docs/API.md](docs/API.md) - REST API
+- [docs/WIREGUARD.md](docs/WIREGUARD.md) - Optional admin access over WireGuard
 
 ## License
 

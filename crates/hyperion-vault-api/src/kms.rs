@@ -11,8 +11,13 @@ use crate::config::{Config, KmsMode};
 
 #[async_trait]
 pub trait KmsProvider: Send + Sync {
-    async fn generate_data_key(&self) -> Result<DataKey>;
-    async fn decrypt_data_key(&self, wrapped: &[u8], key_id: &str) -> Result<Dek>;
+    async fn generate_data_key(&self, context: &[(&str, &str)]) -> Result<DataKey>;
+    async fn decrypt_data_key(
+        &self,
+        wrapped: &[u8],
+        key_id: &str,
+        context: &[(&str, &str)],
+    ) -> Result<Dek>;
 }
 
 pub async fn build(cfg: &Config) -> Result<Arc<dyn KmsProvider>> {
@@ -51,10 +56,10 @@ impl RetryingKms {
 
 #[async_trait]
 impl KmsProvider for RetryingKms {
-    async fn generate_data_key(&self) -> Result<DataKey> {
+    async fn generate_data_key(&self, context: &[(&str, &str)]) -> Result<DataKey> {
         let mut attempt = 0;
         loop {
-            match self.inner.generate_data_key().await {
+            match self.inner.generate_data_key(context).await {
                 Ok(value) => return Ok(value),
                 Err(err) if attempt < self.max_retries => {
                     tracing::warn!(attempt, max = self.max_retries, error = %err, "kms generate_data_key failed; retrying");
@@ -66,10 +71,15 @@ impl KmsProvider for RetryingKms {
         }
     }
 
-    async fn decrypt_data_key(&self, wrapped: &[u8], key_id: &str) -> Result<Dek> {
+    async fn decrypt_data_key(
+        &self,
+        wrapped: &[u8],
+        key_id: &str,
+        context: &[(&str, &str)],
+    ) -> Result<Dek> {
         let mut attempt = 0;
         loop {
-            match self.inner.decrypt_data_key(wrapped, key_id).await {
+            match self.inner.decrypt_data_key(wrapped, key_id, context).await {
                 Ok(value) => return Ok(value),
                 Err(err) if attempt < self.max_retries => {
                     tracing::warn!(attempt, max = self.max_retries, error = %err, "kms decrypt failed; retrying");
@@ -99,12 +109,16 @@ impl AwsKms {
 
 #[async_trait]
 impl KmsProvider for AwsKms {
-    async fn generate_data_key(&self) -> Result<DataKey> {
-        let out = self
+    async fn generate_data_key(&self, context: &[(&str, &str)]) -> Result<DataKey> {
+        let mut request = self
             .client
             .generate_data_key()
             .key_id(&self.key_id)
-            .key_spec(DataKeySpec::Aes256)
+            .key_spec(DataKeySpec::Aes256);
+        for &(key, value) in context {
+            request = request.encryption_context(key, value);
+        }
+        let out = request
             .send()
             .await
             .map_err(|err| anyhow::anyhow!("kms generate_data_key failed: {err:?}"))?;
@@ -127,11 +141,21 @@ impl KmsProvider for AwsKms {
         })
     }
 
-    async fn decrypt_data_key(&self, wrapped: &[u8], _key_id: &str) -> Result<Dek> {
-        let out = self
+    async fn decrypt_data_key(
+        &self,
+        wrapped: &[u8],
+        key_id: &str,
+        context: &[(&str, &str)],
+    ) -> Result<Dek> {
+        let mut request = self
             .client
             .decrypt()
             .ciphertext_blob(Blob::new(wrapped.to_vec()))
+            .key_id(key_id);
+        for &(key, value) in context {
+            request = request.encryption_context(key, value);
+        }
+        let out = request
             .send()
             .await
             .map_err(|err| anyhow::anyhow!("kms decrypt failed: {err:?}"))?;
@@ -147,11 +171,16 @@ pub struct LocalKms {
 
 #[async_trait]
 impl KmsProvider for LocalKms {
-    async fn generate_data_key(&self) -> Result<DataKey> {
+    async fn generate_data_key(&self, _context: &[(&str, &str)]) -> Result<DataKey> {
         Ok(self.inner.generate_data_key()?)
     }
 
-    async fn decrypt_data_key(&self, wrapped: &[u8], key_id: &str) -> Result<Dek> {
+    async fn decrypt_data_key(
+        &self,
+        wrapped: &[u8],
+        key_id: &str,
+        _context: &[(&str, &str)],
+    ) -> Result<Dek> {
         Ok(self.inner.unwrap_data_key(wrapped, key_id)?)
     }
 }

@@ -60,7 +60,7 @@ pub fn open(
     nonce: &[u8; NONCE_LEN],
     aad: &[u8],
     ciphertext: &[u8],
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     let cipher = XChaCha20Poly1305::new(Key::from_slice(&dek[..]));
     cipher
         .decrypt(
@@ -70,6 +70,7 @@ pub fn open(
                 aad,
             },
         )
+        .map(Zeroizing::new)
         .map_err(|_| Error::Decryption)
 }
 
@@ -104,7 +105,11 @@ pub fn seal_envelope<W: KeyWrapper>(wrapper: &W, aad: &[u8], plaintext: &[u8]) -
     })
 }
 
-pub fn open_envelope<W: KeyWrapper>(wrapper: &W, env: &Envelope, aad: &[u8]) -> Result<Vec<u8>> {
+pub fn open_envelope<W: KeyWrapper>(
+    wrapper: &W,
+    env: &Envelope,
+    aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
     let dek = wrapper.unwrap_data_key(&env.wrapped_dek, &env.key_id)?;
     open(&dek, &env.nonce, aad, &env.ciphertext)
 }

@@ -57,6 +57,21 @@ This builds the images, brings up the cluster + APIs, and runs the suite in a
 cross-node replicated reads (write via `api2`, read via `api1`/`api3`), and
 rotation with the grace window.
 
+## Admin access over WireGuard (optional)
+
+To reach the APIs only over a mutually-authenticated, encrypted tunnel (no
+public API surface), add the WireGuard overlay:
+
+```bash
+WG_ENDPOINT=vault.example.com:51820 bash ../scripts/wireguard/gen-keys.sh admin1
+docker compose -f docker-compose.yml -f docker-compose.wireguard.yml up --build
+```
+
+This adds a kernel `wg-quick` gateway (UDP `51820`), pins the cluster network to
+`172.30.0.0/24`, and gates reads to tunnel traffic via `VAULT_ALLOWED_IPS`. See
+[`../docs/WIREGUARD.md`](../docs/WIREGUARD.md) for the topology, peer
+management, and production hardening.
+
 ## Production
 
 Use `VAULT_KMS_MODE=aws` + `VAULT_KMS_KEY_ID`, give every API the same KMS key,

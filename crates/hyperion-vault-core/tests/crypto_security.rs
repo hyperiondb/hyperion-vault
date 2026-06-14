@@ -20,7 +20,7 @@ fn seal_open_round_trips() {
         "ciphertext must not equal plaintext"
     );
     let pt = open(&dek, &nonce, &aad, &ct).unwrap();
-    assert_eq!(pt, plaintext);
+    assert_eq!(pt.as_slice(), plaintext.as_slice());
 }
 
 #[test]
@@ -109,7 +109,10 @@ fn envelope_round_trips_through_wrapper() {
 
     assert_ne!(env.ciphertext.as_slice(), b"top-secret");
     assert!(!env.wrapped_dek.is_empty());
-    assert_eq!(open_envelope(&wrapper, &env, &aad).unwrap(), b"top-secret");
+    assert_eq!(
+        open_envelope(&wrapper, &env, &aad).unwrap().as_slice(),
+        b"top-secret".as_slice()
+    );
 }
 
 #[test]

@@ -1,0 +1,10 @@
+[Interface]
+Address = 10.7.0.1/24
+ListenPort = 51820
+PrivateKey = REPLACE_WITH_HUB_PRIVATE_KEY
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.7.0.0/24 -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.7.0.0/24 -o eth0 -j MASQUERADE
+
+[Peer]
+PublicKey = REPLACE_WITH_CLIENT_PUBLIC_KEY
+AllowedIPs = 10.7.0.2/32
