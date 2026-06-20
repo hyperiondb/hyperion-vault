@@ -5,9 +5,9 @@ use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
 
 use crate::dto::{
-    CreateRoleRequest, CreateSecretRequest, CreateTokenRequest, RoleInfo, SecretMetadata,
-    SecretValue, SetPermissionsRequest, TokenCreated, TokenInfo, UpdateSecretRequest,
-    VerifyRequest, VerifyResponse,
+    BatchGetRequest, CreateRoleRequest, CreateSecretRequest, CreateTokenRequest, RoleInfo,
+    SecretMetadata, SecretValue, SetPermissionsRequest, TokenCreated, TokenInfo,
+    UpdateSecretRequest, VerifyRequest, VerifyResponse,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::guards::{AdminActor, ReaderGuard};
@@ -25,6 +25,7 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/v1/secrets/{name}/rotate", post(rotate_secret))
         .route("/v1/secrets/{name}/verify", post(verify_secret))
+        .route("/v1/batch/secrets", post(batch_get_secrets))
         .route("/v1/roles", post(create_role).get(list_roles))
         .route("/v1/roles/{name}", get(get_role).delete(delete_role))
         .route("/v1/roles/{name}/permissions", put(set_permissions))
@@ -64,6 +65,16 @@ async fn get_secret(
 ) -> ApiResult<Json<SecretValue>> {
     Ok(Json(
         service::get_secret(&state, &name, guard.client_ip).await?,
+    ))
+}
+
+async fn batch_get_secrets(
+    State(state): State<SharedState>,
+    guard: ReaderGuard,
+    Json(req): Json<BatchGetRequest>,
+) -> ApiResult<Json<Vec<SecretValue>>> {
+    Ok(Json(
+        service::get_secrets(&state, req.names, guard.client_ip).await?,
     ))
 }
 

@@ -19,6 +19,7 @@ use crate::store::{AuditEntry, Command, NextRotation, SecretRecord, VersionRecor
 
 const MAX_NAME_LEN: usize = 255;
 const MAX_VALUE_LEN: usize = 1 << 16;
+const MAX_BATCH: usize = 256;
 
 struct Payload {
     format: SecretFormat,
@@ -126,6 +127,52 @@ pub async fn list_secrets(state: &AppState) -> ApiResult<Vec<SecretMetadata>> {
         .into_iter()
         .map(to_metadata)
         .collect())
+}
+
+pub async fn get_secrets(
+    state: &AppState,
+    names: Vec<String>,
+    client_ip: Ipv4Addr,
+) -> ApiResult<Vec<SecretValue>> {
+    if names.len() > MAX_BATCH {
+        return Err(ApiError::BadRequest(format!(
+            "batch too large: {} names (max {MAX_BATCH})",
+            names.len()
+        )));
+    }
+
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        match state.store.current_version(name.clone()).await? {
+            Some((secret, version)) => {
+                let plaintext = open_version(state, &name, version.version, &version).await?;
+                let (value, username, password) = decode_payload(secret.format, plaintext)?;
+                audit(state, None, Some(client_ip), "get", Some(&name), "ok").await;
+                out.push(SecretValue {
+                    name,
+                    kind: secret.kind,
+                    format: secret.format,
+                    version: version.version,
+                    value,
+                    username,
+                    password,
+                    created_at: rfc3339(version.created_at),
+                });
+            }
+            None => {
+                audit(
+                    state,
+                    None,
+                    Some(client_ip),
+                    "get",
+                    Some(&name),
+                    "not_found",
+                )
+                .await;
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub async fn update_secret(

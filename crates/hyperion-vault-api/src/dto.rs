@@ -40,6 +40,11 @@ pub struct VerifyRequest {
     pub value: String,
 }
 
+#[derive(Deserialize)]
+pub struct BatchGetRequest {
+    pub names: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct UserPass {
     pub username: String,

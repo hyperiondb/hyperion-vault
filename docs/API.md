@@ -247,6 +247,18 @@ with `VAULT_BOOTSTRAP_TOKEN=<token>` set (the same value on every node): on
 startup it creates a `bootstrap-admin` token mapped to the built-in `admin` role.
 Use it to create real per-service tokens via `POST /v1/tokens`, then rotate it.
 
+### `POST /v1/batch/secrets` — read many secrets at once *(reader, IP-allowlisted)*
+
+Body — a list of names:
+
+```json
+{ "names": ["db/password", "svc/api-key"] }
+```
+
+Returns an array of `SecretValue` (same shape as `GET /v1/secrets/{name}`) for the
+names that exist; missing names are omitted. IP-allowlisted like single reads (not
+RBAC-gated). Capped at 256 names per request.
+
 ### `GET /healthz` / `GET /readyz`
 
 Liveness (`ok`) and readiness (`ready`, checks the local store).
