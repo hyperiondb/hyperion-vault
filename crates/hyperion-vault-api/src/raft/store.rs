@@ -25,6 +25,14 @@ const META_APPLIED: &str = "last_applied";
 const META_MEMBERSHIP: &str = "membership";
 const META_SNAPSHOT: &str = "snapshot";
 
+pub fn init_raft_tables(db: &Database) -> anyhow::Result<()> {
+    let wtx = db.begin_write()?;
+    wtx.open_table(LOG)?;
+    wtx.open_table(META)?;
+    wtx.commit()?;
+    Ok(())
+}
+
 fn read_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> StorageError<NodeId> {
     StorageIOError::read(AnyError::new(&e)).into()
 }
@@ -294,30 +302,24 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         for entry in entries {
             last_applied = Some(entry.log_id);
             match entry.payload {
-                EntryPayload::Blank => results.push(ApplyResult {
-                    ok: true,
-                    error: None,
-                }),
+                EntryPayload::Blank => results.push(ApplyResult::Ok),
                 EntryPayload::Normal(command) => match apply_command(&wtx, node_id, &command) {
-                    Ok(()) => results.push(ApplyResult {
-                        ok: true,
-                        error: None,
-                    }),
+                    Ok(()) => results.push(ApplyResult::Ok),
+                    Err(crate::store::StoreError::NotFound) => results.push(ApplyResult::NotFound),
+                    Err(crate::store::StoreError::Conflict(message)) => {
+                        results.push(ApplyResult::Conflict(message))
+                    }
+                    Err(crate::store::StoreError::VersionConflict) => {
+                        results.push(ApplyResult::VersionConflict)
+                    }
                     Err(crate::store::StoreError::Internal(err)) => {
                         let io = std::io::Error::other(err.to_string());
                         return Err(StorageIOError::write(AnyError::new(&io)).into());
                     }
-                    Err(err) => results.push(ApplyResult {
-                        ok: false,
-                        error: Some(err.to_string()),
-                    }),
                 },
                 EntryPayload::Membership(member) => {
                     membership = Some(StoredMembership::new(Some(entry.log_id), member));
-                    results.push(ApplyResult {
-                        ok: true,
-                        error: None,
-                    });
+                    results.push(ApplyResult::Ok);
                 }
             }
         }

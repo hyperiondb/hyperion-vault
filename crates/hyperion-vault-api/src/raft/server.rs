@@ -53,7 +53,7 @@ async fn vote(State(raft): State<Raft>, Json(rpc): Json<VoteRequest<u64>>) -> Re
 
 async fn apply(State(raft): State<Raft>, Json(command): Json<Command>) -> Response {
     match raft.client_write(command).await {
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(err) => (StatusCode::CONFLICT, format!("{err}")).into_response(),
+        Ok(response) => (StatusCode::OK, Json(response.data)).into_response(),
+        Err(err) => (StatusCode::SERVICE_UNAVAILABLE, format!("{err}")).into_response(),
     }
 }

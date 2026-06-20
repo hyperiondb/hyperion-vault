@@ -8,7 +8,7 @@ use openraft::{BasicNode, Config};
 
 use super::network::NetworkFactory;
 use super::store::{LogStore, StateMachine};
-use super::types::{NodeId, Raft};
+use super::types::{ApplyResult, NodeId, Raft};
 use crate::store::engine::RedbStore;
 use crate::store::{
     Command, LockoutRecord, RoleRecord, SecretRecord, StoreError, StoreResult, TokenRecord,
@@ -36,6 +36,8 @@ impl RaftNode {
             ..Default::default()
         };
         let config = Arc::new(config.validate().context("invalid raft config")?);
+
+        super::store::init_raft_tables(&store.database()).context("init raft tables")?;
 
         let log_store = LogStore::new(store.database());
         let state_machine = StateMachine::new(store.clone());
@@ -74,7 +76,7 @@ impl RaftNode {
 
     async fn write(&self, command: Command) -> StoreResult<()> {
         match self.raft.client_write(command.clone()).await {
-            Ok(_) => Ok(()),
+            Ok(response) => outcome_to_result(response.data),
             Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => {
                 match forward.leader_node {
                     Some(node) => self.forward(&node.addr, &command).await,
@@ -97,14 +99,27 @@ impl RaftNode {
             .await
             .map_err(|e| StoreError::Internal(anyhow!(e)))?;
         if response.status().is_success() {
-            Ok(())
+            let outcome: ApplyResult = response
+                .json()
+                .await
+                .map_err(|e| StoreError::Internal(anyhow!(e)))?;
+            outcome_to_result(outcome)
         } else {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            Err(StoreError::Conflict(format!(
+            Err(StoreError::Internal(anyhow!(
                 "leader rejected write ({status}): {body}"
             )))
         }
+    }
+}
+
+fn outcome_to_result(outcome: ApplyResult) -> StoreResult<()> {
+    match outcome {
+        ApplyResult::Ok => Ok(()),
+        ApplyResult::NotFound => Err(StoreError::NotFound),
+        ApplyResult::Conflict(message) => Err(StoreError::Conflict(message)),
+        ApplyResult::VersionConflict => Err(StoreError::VersionConflict),
     }
 }
 

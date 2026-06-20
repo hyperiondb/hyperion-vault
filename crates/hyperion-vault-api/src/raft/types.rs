@@ -5,9 +5,12 @@ use serde::{Deserialize, Serialize};
 use crate::store::Command;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ApplyResult {
-    pub ok: bool,
-    pub error: Option<String>,
+pub enum ApplyResult {
+    #[default]
+    Ok,
+    NotFound,
+    Conflict(String),
+    VersionConflict,
 }
 
 openraft::declare_raft_types!(
