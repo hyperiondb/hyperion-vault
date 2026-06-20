@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-      bash curl jq ca-certificates postgresql-client procps coreutils; \
+      bash curl jq ca-certificates coreutils procps; \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /work
 CMD ["bash"]

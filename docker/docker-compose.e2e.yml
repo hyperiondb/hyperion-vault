@@ -1,6 +1,18 @@
 name: hyperion-vault
 
 services:
+  vault1:
+    environment:
+      VAULT_BOOTSTRAP_TOKEN: "${VAULT_BOOTSTRAP_TOKEN:-dev-admin-token-change-me}"
+
+  vault2:
+    environment:
+      VAULT_BOOTSTRAP_TOKEN: "${VAULT_BOOTSTRAP_TOKEN:-dev-admin-token-change-me}"
+
+  vault3:
+    environment:
+      VAULT_BOOTSTRAP_TOKEN: "${VAULT_BOOTSTRAP_TOKEN:-dev-admin-token-change-me}"
+
   runner:
     build:
       context: ..
@@ -8,13 +20,9 @@ services:
     image: hyperion-vault-runner:e2e
     container_name: hv-runner
     environment:
-      SU_PASSWORD: "${SU_PASSWORD:-pgr_super_pw}"
-      VAULT_SERVICE_USER: "${VAULT_SERVICE_USER:-vault_service}"
-      VAULT_SERVICE_PASSWORD: "${VAULT_SERVICE_PASSWORD:-vault_service_pw}"
-      VAULT_ADMIN_TOKEN: "${VAULT_ADMIN_TOKEN:-dev-admin-token-change-me}"
-      APP_DB: "${APP_DB:-postgres}"
+      VAULT_ADMIN_TOKEN: "${VAULT_BOOTSTRAP_TOKEN:-dev-admin-token-change-me}"
     volumes:
       - ..:/work
     working_dir: /work
     networks: [vault]
-    depends_on: [api1, api2, api3]
+    depends_on: [vault1, vault2, vault3]

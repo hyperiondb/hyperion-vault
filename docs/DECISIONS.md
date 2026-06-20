@@ -22,109 +22,135 @@ secret, payload size is unbounded by KMS limits, and the master key never
 leaves KMS. A `KeyWrapper` trait abstracts this so a local dev provider can
 stand in without AWS.
 
-## 3. Application-layer encryption, not in-database (TDE-style)
+## 3. Application-layer encryption
 
-**Decision.** Encryption/decryption happen in the API process; Postgres stores
-only ciphertext. The extension owns schema/RLS/rotation, **not** crypto.
+**Decision.** Encryption/decryption happen in the API process; the store holds
+only ciphertext.
 
-**Why.** KMS calls are network I/O and must be async and non-blocking — that
-does not belong inside a Postgres backend. Keeping crypto in the API keeps the
-`.so` small (mirrors how `pg_replica` shells out rather than blocking
-backends), and makes the security-critical code unit-testable in
-`hyperion-vault-core` without a database.
+**Why.** KMS calls are network I/O and must be async and non-blocking. Keeping
+crypto in the API makes the security-critical code unit-testable in
+`hyperion-vault-core` with no storage or network, and keeps the storage layer a
+dumb byte store.
 
-**Trade-off.** Unlike Supabase Vault there is no in-SQL `decrypted_secrets`
-view; decryption is only available through the API (gated by IP allowlist +
-token). This is intentional — it is the single, audited access path.
+**Trade-off.** Decryption is only available through the API (gated by IP
+allowlist + token). This is intentional — it is the single, audited access path.
 
-## 4. Primary-routed writes, local reads (the `pg_replica` contract)
+## 4. Embedded storage with redb
 
-**Decision.** Two connection pools: a **writer** pool with
-`target_session_attrs=read-write` and a **reader** pool with `=any`.
+**Decision.** Persist all state to a local embedded **redb** key-value store
+(one file per node), instead of an external database.
 
-**Why.** `pg_replica` uses physical replication — standbys are read-only and
-only the primary accepts writes. A multi-host writer pool always lands on the
-current primary and follows failover, so `create/update/delete/rotate` work
-from *any* node. Reads (and decryption) are served locally for latency and to
-spread load. This is exactly the libpq pattern `pg_replica` documents for
-clients.
+**Why.** The previous design required operating a full PostgreSQL cluster plus
+extensions just to hold a handful of secret rows. redb is a pure-Rust,
+zero-dependency, ACID embedded store — no server to run, no connection pools, no
+SQL. Secrets, versions, roles, tokens, the audit log, the lockout table, and the
+Raft log/snapshots all live in that one file.
 
-## 5. Rotation: supervisor in the DB, worker in the API
+**Trade-off.** redb is single-process: it cannot be shared across hosts. Cross-
+node durability and HA are provided by Raft (ADR 5), not by the storage engine.
 
-**Decision.** The extension's background worker only **enqueues** due rotations
-(primary-only) and notifies; the API worker **performs** them.
+## 5. Replication & failover via Raft (openraft)
 
-**Why.** Detecting "what is due" is cheap SQL that belongs next to the data and
-should run autonomously even if the API restarts. Performing rotation needs KMS
-(async) and the secret-generation logic, which live in the API. The
-`rotation_jobs` queue with `FOR UPDATE SKIP LOCKED` makes rotation safe when
-every node runs a worker.
+**Decision.** Run the vault as a Raft cluster using **openraft**. The Raft state
+machine is the redb store; writes are committed through consensus to the leader
+and replicated to a quorum; reads are served locally from any node.
 
-## 6. Grace windows via per-version `expires_at`
+**Why.** This replaces PostgreSQL physical replication + `pg_replica` Raft
+failover with a self-contained equivalent: the **leader** is the primary, leader
+election is automatic failover, and a follower transparently forwards writes to
+the current leader. Linearizable reads are available on request
+(`VAULT_READ_CONSISTENCY=linearizable`); the default serves reads locally for
+latency and load spreading.
 
-**Decision.** Superseded versions keep `expires_at = now() + grace_period` and
+**Trade-off.** A write needs a quorum, so it costs one consensus round-trip; and
+the cluster needs an odd node count (3 or 5) to tolerate failures cleanly.
+
+## 6. Ports & adapters around storage
+
+**Decision.** The service layer depends only on the `VaultReader` /
+`VaultWriter` traits. The single-node `RedbStore` and the Raft-backed
+`RaftStore` are interchangeable adapters; every mutation is a `Command` applied
+by one deterministic `apply_command`.
+
+**Why.** It keeps the consensus/storage choice out of the business logic (a
+future engine is one `impl`, not a rewrite), makes the write path testable
+without a cluster, and guarantees the single-node and replicated paths apply
+mutations identically — `apply_command` is the single source of truth, used both
+directly by `RedbStore` and by the Raft state machine.
+
+## 7. Rotation runs on the leader
+
+**Decision.** The rotation worker runs on every node but only acts when it is
+the Raft leader; it scans for due secrets and issues `RotateSecret` /
+`ExpireGraceVersions` commands through Raft.
+
+**Why.** Detecting "what is due" is a cheap local scan; performing rotation needs
+KMS (async) and replicated state changes. Gating on leadership avoids the
+multi-worker dedupe that a queue (`FOR UPDATE SKIP LOCKED`) previously required —
+there is exactly one leader, so there is exactly one rotation driver, and the
+mutations replicate like any other write.
+
+## 8. Grace windows via per-version `expires_at`
+
+**Decision.** Superseded versions keep `expires_at = now + grace_period` and
 remain decryptable/verifiable until then.
 
-**Why.** Automatic secrets are consumed by external services that cannot all
-cut over instantly. During the grace window both the new and previous secret
-validate (`/verify`), enabling zero-downtime rotation. Manual secrets default
-to zero grace (immediate supersede).
+**Why.** Automatic secrets are consumed by external services that cannot all cut
+over instantly. During the grace window both the new and previous secret
+validate (`/verify`), enabling zero-downtime rotation. Manual secrets default to
+zero grace (immediate supersede).
 
-## 7. IP allowlist is fail-closed
+## 9. IP allowlist is fail-closed
 
 **Decision.** Reads are allowed only from `VAULT_ALLOWED_IPS`; an empty or
 unparseable-to-empty list denies everything.
 
-**Why.** A misconfiguration must never silently expose secrets to the world.
-The default posture is deny.
+**Why.** A misconfiguration must never silently expose secrets to the world. The
+default posture is deny.
 
-## 8. Admin tokens stored as SHA-256 fingerprints, compared in constant time
+## 10. Admin tokens stored as SHA-256 fingerprints, compared in constant time
 
-**Decision.** Generate 256-bit random tokens; store only `sha256(token)`;
-verify with a constant-time comparison.
+**Decision.** Generate 256-bit random tokens; store only `sha256(token)`; verify
+with a constant-time comparison.
 
 **Why.** Tokens are high-entropy (brute force infeasible), so a fast hash is
-sufficient and avoids per-request KDF cost; storing only the fingerprint means
-a database leak does not reveal usable tokens. Constant-time comparison closes
-the timing side channel.
+sufficient and avoids per-request KDF cost; storing only the fingerprint means a
+store leak does not reveal usable tokens. Constant-time comparison closes the
+timing side channel.
 
-## 9. Extension lib `hyperion_vault`, SQL schema `vault`
+## 11. Node identity from `NODE_ID` + `VAULT_PEERS`, derived not duplicated
 
-**Decision.** The shared library / control file is `hyperion_vault`; the SQL
-objects live in schema `vault`.
+**Decision.** A node's identity is `NODE_ID`; the cluster map `VAULT_PEERS`
+(`id=host:port`, identical on every node) gives every node's reachable Raft
+address. A node binds the port from its own `VAULT_PEERS` entry. The public API
+binds `0.0.0.0:VAULT_API_PORT`.
 
-**Why.** Mirrors `pg_replica` (lib `pg_replica`, schema `replica`). The lib
-name avoids crates.io / extension-name collisions; the short `vault` schema
-keeps the SQL API ergonomic. Rename the schema if it would clash with another
-installed `vault` extension in the same database.
+**Why.** A bind address tells a peer nothing about how to reach a node (and the
+external port can differ from the bind), so a single advertised cluster map is
+the source of truth. This removes the redundant `VAULT_NODE_NAME` and
+`VAULT_API_LISTEN` of the previous design.
 
-## 10. Cache unwrapped data keys (not plaintext) for KMS-outage resilience
+## 12. Cache unwrapped data keys (not plaintext) for KMS-outage resilience
 
 **Decision.** The API keeps an in-memory cache of **unwrapped DEKs**, keyed by
 the wrapped-DEK bytes, with a TTL from `VAULT_DEK_CACHE_TTL_SECS` (default 300s;
 `0` disables).
 
-**Why.** AWS KMS can rate-limit or briefly fail. Without a cache every read is a
-KMS `Decrypt`, so a KMS outage takes down all reads. Caching the *unwrapped DEK*
+**Why.** AWS KMS can rate-limit or briefly fail. Caching the *unwrapped DEK*
 (rather than the plaintext secret) lets reads of any previously-read version
 continue through an outage while still requiring the AEAD `open` step and never
-storing the secret value itself in the cache.
+storing the secret value itself.
 
-**Trade-off.** Cached DEKs live in process memory for up to the TTL, widening
-the window in which a memory compromise could decrypt those versions. Operators
-trade confidentiality window against read availability by tuning the TTL; set
-`0` for maximum confidentiality (every read hits KMS). Entries are zeroized on
-eviction. Writes always call KMS and therefore fail closed during an outage.
+**Trade-off.** Cached DEKs live in process memory for up to the TTL. Set `0` for
+maximum confidentiality (every read hits KMS). Writes always call KMS and fail
+closed during an outage.
 
-## 11. Retry KMS calls with exponential backoff
+## 13. Retry KMS calls with exponential backoff
 
 **Decision.** A `RetryingKms` decorator retries both KMS operations up to
 `VAULT_KMS_MAX_RETRIES` (default 5; `0` disables) with exponential backoff
 (100ms doubling, capped).
 
 **Why.** Writes always call `GenerateDataKey`, so a KMS rate-limit or transient
-error would otherwise fail every create/update/rotate. Retrying with backoff
-rides out throttling and brief outages. Reads retry too, but only on a cache
-miss (the DEK cache absorbs most read load). The decorator wraps any provider,
-so the local dev provider is unaffected in practice (it does not fail
-transiently).
+error would otherwise fail every create/update/rotate. Reads retry too, but only
+on a cache miss.

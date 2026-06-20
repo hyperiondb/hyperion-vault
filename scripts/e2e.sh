@@ -15,12 +15,12 @@ cleanup() { "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 if [ "${1:-}" != "--no-build" ]; then
-  echo "== building images (requires PG_REPLICA_IMAGE, default pg-replica-paradedb:local) =="
+  echo "== building vault cluster image =="
   "${COMPOSE[@]}" build || { echo "build FAILED"; exit 1; }
 fi
 
-echo "== starting cluster + api =="
-"${COMPOSE[@]}" up -d node1 node2 node3 api1 api2 api3
+echo "== starting vault cluster =="
+"${COMPOSE[@]}" up -d vault1 vault2 vault3
 
 echo "== running e2e suite =="
 "${COMPOSE[@]}" run --rm runner bash scripts/e2e/run-all.sh

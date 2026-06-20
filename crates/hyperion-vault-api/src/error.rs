@@ -3,6 +3,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+use crate::store::StoreError;
+
 #[derive(Debug)]
 pub enum ApiError {
     Unauthorized,
@@ -56,15 +58,16 @@ impl From<hyperion_vault_core::Error> for ApiError {
     }
 }
 
-impl From<tokio_postgres::Error> for ApiError {
-    fn from(err: tokio_postgres::Error) -> Self {
-        ApiError::Internal(anyhow::Error::new(err))
-    }
-}
-
-impl From<deadpool_postgres::PoolError> for ApiError {
-    fn from(err: deadpool_postgres::PoolError) -> Self {
-        ApiError::Internal(anyhow::Error::new(err))
+impl From<StoreError> for ApiError {
+    fn from(err: StoreError) -> Self {
+        match err {
+            StoreError::NotFound => ApiError::NotFound,
+            StoreError::Conflict(msg) => ApiError::Conflict(msg),
+            StoreError::VersionConflict => {
+                ApiError::Conflict("write conflict; retry the request".to_string())
+            }
+            StoreError::Internal(err) => ApiError::Internal(err),
+        }
     }
 }
 

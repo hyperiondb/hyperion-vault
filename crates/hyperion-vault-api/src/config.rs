@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use anyhow::{bail, Context, Result};
@@ -10,22 +11,20 @@ pub enum KmsMode {
 
 #[derive(Clone)]
 pub struct Config {
-    pub listen: SocketAddr,
+    pub node_id: u64,
+    pub peers: BTreeMap<u64, String>,
+    pub api_listen: SocketAddr,
+    pub db_path: String,
+    pub bootstrap_token: Option<String>,
     pub allowed_ips: String,
     pub trust_proxy: bool,
-    pub pg_hosts: Vec<String>,
-    pub pg_port: u16,
-    pub pg_user: String,
-    pub pg_password: String,
-    pub pg_dbname: String,
-    pub pool_max: usize,
+    pub read_consistency_linearizable: bool,
     pub kms_mode: KmsMode,
     pub kms_key_id: String,
     pub local_master_key_b64: Option<String>,
     pub rotation_poll_secs: u64,
     pub dek_cache_ttl_secs: u64,
     pub kms_max_retries: u32,
-    pub node_name: String,
     pub auth_max_failures: u32,
     pub auth_lockout_secs: i64,
     pub auth_window_secs: i64,
@@ -33,18 +32,23 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let listen: SocketAddr = env_or("VAULT_API_LISTEN", "0.0.0.0:8200")
+        let node_id: u64 = env_or("NODE_ID", "1")
             .parse()
-            .context("VAULT_API_LISTEN must be host:port")?;
-
-        let pg_hosts: Vec<String> = env_or("VAULT_PG_HOSTS", "127.0.0.1")
-            .split(',')
-            .map(|host| host.trim().to_string())
-            .filter(|host| !host.is_empty())
-            .collect();
-        if pg_hosts.is_empty() {
-            bail!("VAULT_PG_HOSTS must list at least one host");
+            .context("NODE_ID must be a positive integer")?;
+        if node_id == 0 {
+            bail!("NODE_ID must be >= 1");
         }
+
+        let peers = parse_peers(&env_or("VAULT_PEERS", ""))?;
+
+        let api_port: u16 = env_or("VAULT_API_PORT", "8200")
+            .parse()
+            .context("VAULT_API_PORT must be a port number")?;
+        let api_listen: SocketAddr = format!("0.0.0.0:{api_port}")
+            .parse()
+            .expect("0.0.0.0:<port> is a valid socket address");
+
+        let db_path = env_or("VAULT_DB_PATH", "vault.redb");
 
         let kms_mode = match env_or("VAULT_KMS_MODE", "aws").to_lowercase().as_str() {
             "aws" => KmsMode::Aws,
@@ -65,19 +69,15 @@ impl Config {
         }
 
         Ok(Self {
-            listen,
+            node_id,
+            peers,
+            api_listen,
+            db_path,
+            bootstrap_token: env_opt("VAULT_BOOTSTRAP_TOKEN"),
             allowed_ips: env_or("VAULT_ALLOWED_IPS", ""),
             trust_proxy: parse_bool(&env_or("VAULT_TRUST_PROXY", "false")),
-            pg_hosts,
-            pg_port: env_or("VAULT_PG_PORT", "5432")
-                .parse()
-                .context("VAULT_PG_PORT must be a port number")?,
-            pg_user: env_or("VAULT_PG_USER", "vault_service"),
-            pg_password: env_or("VAULT_PG_PASSWORD", ""),
-            pg_dbname: env_or("VAULT_PG_DBNAME", "postgres"),
-            pool_max: env_or("VAULT_PG_POOL_MAX", "16")
-                .parse()
-                .context("VAULT_PG_POOL_MAX must be an integer")?,
+            read_consistency_linearizable: env_or("VAULT_READ_CONSISTENCY", "local").to_lowercase()
+                == "linearizable",
             kms_mode,
             kms_key_id,
             local_master_key_b64,
@@ -90,7 +90,6 @@ impl Config {
             kms_max_retries: env_or("VAULT_KMS_MAX_RETRIES", "5")
                 .parse()
                 .context("VAULT_KMS_MAX_RETRIES must be an integer (0 disables retries)")?,
-            node_name: env_or("VAULT_NODE_NAME", &hostname_fallback()),
             auth_max_failures: env_or("VAULT_AUTH_MAX_FAILURES", "5")
                 .parse()
                 .context("VAULT_AUTH_MAX_FAILURES must be an integer (0 disables lockout)")?,
@@ -102,6 +101,37 @@ impl Config {
             )?,
         })
     }
+
+    pub fn peer_addr(&self, id: u64) -> Option<&str> {
+        self.peers.get(&id).map(|s| s.as_str())
+    }
+
+    pub fn self_addr(&self) -> Option<&str> {
+        self.peer_addr(self.node_id)
+    }
+}
+
+fn parse_peers(raw: &str) -> Result<BTreeMap<u64, String>> {
+    let mut map = BTreeMap::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (id, addr) = entry
+            .split_once('=')
+            .with_context(|| format!("VAULT_PEERS entry '{entry}' must be 'id=host:port'"))?;
+        let id: u64 = id
+            .trim()
+            .parse()
+            .with_context(|| format!("VAULT_PEERS id '{id}' must be an integer"))?;
+        let addr = addr.trim().to_string();
+        if addr.is_empty() {
+            bail!("VAULT_PEERS entry '{entry}' has an empty address");
+        }
+        map.insert(id, addr);
+    }
+    Ok(map)
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -114,11 +144,4 @@ fn env_opt(key: &str) -> Option<String> {
 
 fn parse_bool(value: &str) -> bool {
     matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on")
-}
-
-fn hostname_fallback() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "vault-api".to_string())
 }

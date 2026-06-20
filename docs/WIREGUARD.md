@@ -18,15 +18,15 @@ Why it fits an admin-only surface:
   config only.
 
 This complements, and does not replace, the API's bearer tokens + RBAC (user
-identity and authorization) and Postgres auth.
+identity and authorization).
 
 ## Topology
 
 ```
 admin device (10.7.0.2)  ──wg──►  gateway (wg0 10.7.0.1)
-                                   eth0 172.30.0.2  ──►  api1 172.30.0.11:8200
-                                                         api2 172.30.0.12:8200
-                                                         api3 172.30.0.13:8200
+                                   eth0 172.30.0.2  ──►  vault1 172.30.0.11:8200
+                                                         vault2 172.30.0.12:8200
+                                                         vault3 172.30.0.13:8200
 ```
 
 - Admin devices are WireGuard peers on `10.7.0.0/24` (hub `10.7.0.1`).
@@ -85,7 +85,7 @@ curl http://172.30.0.11:8200/v1/secrets/db/password \
 
 - **Source IP is the gateway.** Because traffic is masqueraded, every tunnel
   client appears to the API as `172.30.0.2`. Per-admin identity is still
-  enforced by **RBAC tokens** and recorded as the actor in `vault.audit_log`,
+  enforced by **RBAC tokens** and recorded as the actor in the audit log,
   but the audit `client_ip` and the brute-force **lockout** are keyed to the
   gateway — so a lockout affects all tunnel users together. If you need
   per-admin source IPs (and per-admin lockout), run the gateway in routed

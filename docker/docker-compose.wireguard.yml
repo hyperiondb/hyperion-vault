@@ -15,27 +15,27 @@ services:
       - ./wireguard/wg0.conf:/etc/wireguard/wg0.conf:ro
     ports:
       - "51820:51820/udp"
-    depends_on: [api1, api2, api3]
+    depends_on: [vault1, vault2, vault3]
     restart: unless-stopped
     networks:
       vault:
         ipv4_address: 172.30.0.2
 
-  api1:
+  vault1:
     environment:
       VAULT_ALLOWED_IPS: "172.30.0.2/32"
     networks:
       vault:
         ipv4_address: 172.30.0.11
 
-  api2:
+  vault2:
     environment:
       VAULT_ALLOWED_IPS: "172.30.0.2/32"
     networks:
       vault:
         ipv4_address: 172.30.0.12
 
-  api3:
+  vault3:
     environment:
       VAULT_ALLOWED_IPS: "172.30.0.2/32"
     networks:

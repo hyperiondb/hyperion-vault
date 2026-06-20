@@ -197,7 +197,6 @@ async fn healthz() -> &'static str {
 }
 
 async fn readyz(State(state): State<SharedState>) -> Result<&'static str, ApiError> {
-    let client = state.db.reader().await?;
-    client.simple_query("SELECT 1").await?;
+    state.store.list_roles().await?;
     Ok("ready")
 }

@@ -1,21 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
-    "extension",
     "crates/hyperion-vault",
     "crates/hyperion-vault-core",
     "crates/hyperion-vault-api",
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Tadas Talaikis <info@nordlet.com>"]
 repository = "https://github.com/hyperiondb/hyperion-vault"
 homepage="https://hyperiondb.eu/"
 readme = "README.md"
-keywords = ["postgresql", "secrets", "vault", "encryption", "decryption"]
+keywords = ["secrets", "vault", "encryption", "raft", "redb"]
 categories = ["database", "cryptography"]
 
 [workspace.dependencies]
@@ -33,8 +32,12 @@ subtle = "=2.6.1"
 base64 = "=0.22.1"
 ipnet = "=2.12.0"
 anyhow = "=1.0.102"
-hyperion-vault-core = { path = "crates/hyperion-vault-core", version = "=0.4.0" }
-hyperion-vault-api = { path = "crates/hyperion-vault-api", version = "=0.4.0" }
+redb = "=4.1.0"
+time = { version = "=0.3.49", features = ["formatting"] }
+openraft = { version = "=0.9.24", features = ["serde", "storage-v2"] }
+reqwest = { version = "=0.12.23", default-features = false, features = ["json"] }
+hyperion-vault-core = { path = "crates/hyperion-vault-core", version = "=0.5.0" }
+hyperion-vault-api = { path = "crates/hyperion-vault-api", version = "=0.5.0" }
 
 [profile.dev]
 panic = "unwind"

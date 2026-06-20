@@ -1,7 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::anyhow;
-use tokio_postgres::error::SqlState;
 use zeroize::Zeroizing;
 
 use hyperion_vault_core::auth;
@@ -9,23 +8,17 @@ use hyperion_vault_core::crypto::{generate_nonce, open, seal, Dek, NONCE_LEN};
 use hyperion_vault_core::types::aad_for;
 use hyperion_vault_core::{SecretFormat, SecretKind};
 
+use crate::clock::{now_unix, rfc3339, rfc3339_opt};
 use crate::dto::{
     CreateSecretRequest, SecretMetadata, SecretValue, UpdateSecretRequest, UserPass, VerifyResponse,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::lockout;
 use crate::state::AppState;
+use crate::store::{AuditEntry, Command, NextRotation, SecretRecord, VersionRecord};
 
 const MAX_NAME_LEN: usize = 255;
 const MAX_VALUE_LEN: usize = 1 << 16;
-
-struct Sealed {
-    key_id: String,
-    wrapped_dek: Vec<u8>,
-    nonce: Vec<u8>,
-    ciphertext: Vec<u8>,
-    aad: Vec<u8>,
-}
 
 struct Payload {
     format: SecretFormat,
@@ -55,38 +48,32 @@ pub async fn create_secret(
     }
 
     let payload = build_create_payload(&req)?;
-    let sealed = seal_version(state, &req.name, 1, &payload.bytes).await?;
+    let now = now_unix();
+    let version = seal_version(state, &req.name, 1, &payload.bytes, now).await?;
 
-    let mut client = state.db.writer().await?;
-    let tx = client.transaction().await?;
+    let next_rotation_at = if req.kind == SecretKind::Automatic {
+        req.rotation_interval_secs.map(|secs| now + secs)
+    } else {
+        None
+    };
 
-    let row = tx
-        .query_one(
-            "INSERT INTO vault.secrets \
-                (name, kind, format, description, rotation_interval, grace_period, current_version, next_rotation_at) \
-             VALUES ($1, $2::vault.secret_kind, $3, $4, \
-                CASE WHEN $5::bigint IS NULL THEN NULL ELSE make_interval(secs => $5::bigint) END, \
-                make_interval(secs => $6::bigint), 1, \
-                CASE WHEN $5::bigint IS NULL THEN NULL ELSE now() + make_interval(secs => $5::bigint) END) \
-             RETURNING id::text, created_at::text",
-            &[
-                &req.name,
-                &req.kind.as_str(),
-                &payload.format.as_str(),
-                &req.description,
-                &req.rotation_interval_secs,
-                &grace,
-            ],
-        )
-        .await
-        .map_err(|err| insert_conflict(err, &req.name))?;
+    let secret = SecretRecord {
+        name: req.name.clone(),
+        kind: req.kind,
+        format: payload.format,
+        description: req.description.clone(),
+        rotation_interval_secs: req.rotation_interval_secs,
+        grace_secs: grace,
+        current_version: 1,
+        next_rotation_at,
+        created_at: now,
+        updated_at: now,
+    };
 
-    let id: String = row.get(0);
-    let created_at: String = row.get(1);
-
-    insert_version(&tx, &id, 1, &sealed).await?;
-    tx.commit().await?;
-
+    state
+        .store
+        .apply(Command::CreateSecret { secret, version })
+        .await?;
     audit(state, Some(actor), None, "create", Some(&req.name), "ok").await;
 
     Ok(SecretValue {
@@ -97,7 +84,7 @@ pub async fn create_secret(
         value: payload.value,
         username: payload.username,
         password: payload.password,
-        created_at,
+        created_at: rfc3339(now),
     })
 }
 
@@ -106,91 +93,39 @@ pub async fn get_secret(
     name: &str,
     client_ip: Ipv4Addr,
 ) -> ApiResult<SecretValue> {
-    let client = state.db.reader().await?;
-    let row = client
-        .query_opt(
-            "SELECT s.kind::text, s.format, v.version, v.kms_key_id, v.wrapped_dek, v.nonce, v.ciphertext, v.aad, v.created_at::text \
-             FROM vault.secrets s \
-             JOIN vault.secret_versions v ON v.secret_id = s.id AND v.version = s.current_version \
-             WHERE s.name = $1",
-            &[&name],
-        )
-        .await?;
-
-    let row = match row {
-        Some(row) => row,
+    let (secret, version) = match state.store.current_version(name.to_string()).await? {
+        Some(pair) => pair,
         None => {
             audit(state, None, Some(client_ip), "get", Some(name), "not_found").await;
             return Err(ApiError::NotFound);
         }
     };
 
-    let kind = parse_kind(row.get::<_, String>(0))?;
-    let format = parse_format(row.get::<_, String>(1))?;
-    let version: i32 = row.get(2);
-    let key_id: String = row.get(3);
-    let wrapped: Vec<u8> = row.get(4);
-    let nonce: Vec<u8> = row.get(5);
-    let ciphertext: Vec<u8> = row.get(6);
-    let aad: Vec<u8> = row.get(7);
-    let created_at: String = row.get(8);
-
-    let plaintext = open_version(
-        state,
-        name,
-        version,
-        &key_id,
-        &wrapped,
-        &nonce,
-        &aad,
-        &ciphertext,
-    )
-    .await?;
-    let (value, username, password) = decode_payload(format, plaintext)?;
+    let plaintext = open_version(state, name, version.version, &version).await?;
+    let (value, username, password) = decode_payload(secret.format, plaintext)?;
 
     audit(state, None, Some(client_ip), "get", Some(name), "ok").await;
 
     Ok(SecretValue {
         name: name.to_string(),
-        kind,
-        format,
-        version,
+        kind: secret.kind,
+        format: secret.format,
+        version: version.version,
         value,
         username,
         password,
-        created_at,
+        created_at: rfc3339(version.created_at),
     })
 }
 
 pub async fn list_secrets(state: &AppState) -> ApiResult<Vec<SecretMetadata>> {
-    let client = state.db.reader().await?;
-    let rows = client
-        .query(
-            "SELECT name, kind::text, format, description, current_version, \
-                EXTRACT(EPOCH FROM rotation_interval)::bigint, \
-                EXTRACT(EPOCH FROM grace_period)::bigint, \
-                next_rotation_at::text, created_at::text, updated_at::text \
-             FROM vault.secrets ORDER BY name",
-            &[],
-        )
-        .await?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(SecretMetadata {
-            name: row.get(0),
-            kind: parse_kind(row.get::<_, String>(1))?,
-            format: parse_format(row.get::<_, String>(2))?,
-            description: row.get(3),
-            version: row.get(4),
-            rotation_interval_secs: row.get(5),
-            grace_period_secs: row.get::<_, Option<i64>>(6).unwrap_or(0),
-            next_rotation_at: row.get(7),
-            created_at: row.get(8),
-            updated_at: row.get(9),
-        });
-    }
-    Ok(out)
+    Ok(state
+        .store
+        .list_secrets()
+        .await?
+        .into_iter()
+        .map(to_metadata)
+        .collect())
 }
 
 pub async fn update_secret(
@@ -214,28 +149,14 @@ pub async fn update_secret(
         }
     }
 
-    let mut client = state.db.writer().await?;
-    let tx = client.transaction().await?;
-
-    let row = tx
-        .query_opt(
-            "SELECT id::text, kind::text, format, current_version, \
-                EXTRACT(EPOCH FROM grace_period)::bigint \
-             FROM vault.secrets WHERE name = $1 FOR UPDATE",
-            &[&name],
-        )
-        .await?;
-
-    let row = match row {
-        Some(row) => row,
-        None => return Err(ApiError::NotFound),
-    };
-
-    let id: String = row.get(0);
-    let kind = parse_kind(row.get::<_, String>(1))?;
-    let format = parse_format(row.get::<_, String>(2))?;
-    let current_version: i32 = row.get(3);
-    let grace_secs: i64 = row.get::<_, Option<i64>>(4).unwrap_or(0);
+    let secret = state
+        .store
+        .secret(name.to_string())
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let format = secret.format;
+    let kind = secret.kind;
+    let current_version = secret.current_version;
 
     match format {
         SecretFormat::Opaque if req.username.is_some() || req.password.is_some() => {
@@ -256,8 +177,13 @@ pub async fn update_secret(
         SecretFormat::Userpass => req.username.is_some() || req.password.is_some(),
     };
 
-    let mut new_version = current_version;
-    if secret_changed {
+    let now = now_unix();
+    let effective_interval = req
+        .rotation_interval_secs
+        .or(secret.rotation_interval_secs)
+        .unwrap_or(0);
+
+    let command = if secret_changed {
         let bytes = match format {
             SecretFormat::Opaque => {
                 let value = req.value.clone().unwrap_or_default();
@@ -265,7 +191,7 @@ pub async fn update_secret(
                 value.into_bytes()
             }
             SecretFormat::Userpass => {
-                let current = load_userpass(state, &tx, name, &id, current_version).await?;
+                let current = load_userpass(state, name, current_version).await?;
                 let username = req.username.clone().unwrap_or(current.username);
                 let password = req.password.clone().unwrap_or(current.password);
                 validate_field("username", &username)?;
@@ -274,59 +200,54 @@ pub async fn update_secret(
             }
         };
 
-        new_version = current_version + 1;
-        let sealed = seal_version(state, name, new_version, &bytes).await?;
-        insert_version(&tx, &id, new_version, &sealed).await?;
-        tx.execute(
-            "UPDATE vault.secret_versions \
-             SET expires_at = now() + make_interval(secs => $3::bigint) \
-             WHERE secret_id = $1::uuid AND version = $2 AND expires_at IS NULL",
-            &[&id, &current_version, &grace_secs],
-        )
-        .await?;
-    }
+        let new_version = current_version + 1;
+        let version = seal_version(state, name, new_version, &bytes, now).await?;
+        let reset_timer = kind == SecretKind::Automatic;
+        Command::PutVersion {
+            name: name.to_string(),
+            expected_current: current_version,
+            version,
+            supersede_expires_at: Some(now + secret.grace_secs),
+            set_description: req.description.clone(),
+            set_rotation_interval_secs: req.rotation_interval_secs,
+            set_grace_secs: req.grace_period_secs,
+            next_rotation_at: if reset_timer {
+                NextRotation::Set(Some(now + effective_interval))
+            } else {
+                NextRotation::Keep
+            },
+            updated_at: now,
+        }
+    } else {
+        let reset_timer = kind == SecretKind::Automatic && req.rotation_interval_secs.is_some();
+        Command::UpdateMeta {
+            name: name.to_string(),
+            expected_current: current_version,
+            set_description: req.description.clone(),
+            set_rotation_interval_secs: req.rotation_interval_secs,
+            set_grace_secs: req.grace_period_secs,
+            next_rotation_at: if reset_timer {
+                NextRotation::Set(Some(now + effective_interval))
+            } else {
+                NextRotation::Keep
+            },
+            updated_at: now,
+        }
+    };
 
-    let reset_timer =
-        kind == SecretKind::Automatic && (secret_changed || req.rotation_interval_secs.is_some());
-
-    tx.execute(
-        "UPDATE vault.secrets SET \
-            description = COALESCE($2, description), \
-            rotation_interval = CASE WHEN $3::bigint IS NULL THEN rotation_interval \
-                ELSE make_interval(secs => $3::bigint) END, \
-            grace_period = CASE WHEN $4::bigint IS NULL THEN grace_period \
-                ELSE make_interval(secs => $4::bigint) END, \
-            current_version = $5, \
-            next_rotation_at = CASE WHEN $6 THEN \
-                now() + COALESCE(make_interval(secs => $3::bigint), rotation_interval) \
-                ELSE next_rotation_at END, \
-            updated_at = now() \
-         WHERE name = $1",
-        &[
-            &name,
-            &req.description,
-            &req.rotation_interval_secs,
-            &req.grace_period_secs,
-            &new_version,
-            &reset_timer,
-        ],
-    )
-    .await?;
-
-    tx.commit().await?;
+    state.store.apply(command).await?;
     audit(state, Some(actor), None, "update", Some(name), "ok").await;
 
     load_metadata(state, name).await
 }
 
 pub async fn delete_secret(state: &AppState, actor: &str, name: &str) -> ApiResult<()> {
-    let client = state.db.writer().await?;
-    let affected = client
-        .execute("DELETE FROM vault.secrets WHERE name = $1", &[&name])
+    state
+        .store
+        .apply(Command::DeleteSecret {
+            name: name.to_string(),
+        })
         .await?;
-    if affected == 0 {
-        return Err(ApiError::NotFound);
-    }
     audit(state, Some(actor), None, "delete", Some(name), "ok").await;
     Ok(())
 }
@@ -337,43 +258,27 @@ pub async fn rotate(
     client_ip: Option<Ipv4Addr>,
     name: &str,
 ) -> ApiResult<SecretValue> {
-    let mut client = state.db.writer().await?;
-    let tx = client.transaction().await?;
+    let secret = state
+        .store
+        .secret(name.to_string())
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
-    let row = tx
-        .query_opt(
-            "SELECT id::text, kind::text, format, current_version, \
-                EXTRACT(EPOCH FROM grace_period)::bigint, \
-                EXTRACT(EPOCH FROM rotation_interval)::bigint \
-             FROM vault.secrets WHERE name = $1 FOR UPDATE",
-            &[&name],
-        )
-        .await?;
-
-    let row = match row {
-        Some(row) => row,
-        None => return Err(ApiError::NotFound),
-    };
-
-    let id: String = row.get(0);
-    let kind = parse_kind(row.get::<_, String>(1))?;
-    let format = parse_format(row.get::<_, String>(2))?;
-    let current_version: i32 = row.get(3);
-    let grace_secs: i64 = row.get::<_, Option<i64>>(4).unwrap_or(0);
-    let interval_secs: Option<i64> = row.get(5);
-
-    if kind != SecretKind::Automatic {
+    if secret.kind != SecretKind::Automatic {
         return Err(ApiError::BadRequest(
             "only automatic secrets can be rotated; use update for manual secrets".into(),
         ));
     }
 
+    let current_version = secret.current_version;
     let new_version = current_version + 1;
-    let payload = match format {
+    let now = now_unix();
+
+    let payload = match secret.format {
         SecretFormat::Opaque => {
             let value = auth::generate_token();
             Payload {
-                format,
+                format: SecretFormat::Opaque,
                 bytes: value.clone().into_bytes(),
                 value: Some(value),
                 username: None,
@@ -381,11 +286,11 @@ pub async fn rotate(
             }
         }
         SecretFormat::Userpass => {
-            let current = load_userpass(state, &tx, name, &id, current_version).await?;
+            let current = load_userpass(state, name, current_version).await?;
             let password = auth::generate_token();
             let bytes = encode_userpass(&current.username, &password);
             Payload {
-                format,
+                format: SecretFormat::Userpass,
                 bytes,
                 value: None,
                 username: Some(current.username),
@@ -394,43 +299,35 @@ pub async fn rotate(
         }
     };
 
-    let sealed = seal_version(state, name, new_version, &payload.bytes).await?;
-    insert_version(&tx, &id, new_version, &sealed).await?;
+    let version = seal_version(state, name, new_version, &payload.bytes, now).await?;
+    let interval = secret.rotation_interval_secs.unwrap_or(0);
 
-    tx.execute(
-        "UPDATE vault.secret_versions \
-         SET expires_at = now() + make_interval(secs => $3::bigint) \
-         WHERE secret_id = $1::uuid AND version = $2 AND expires_at IS NULL",
-        &[&id, &current_version, &grace_secs],
-    )
-    .await?;
-
-    let created_at_row = tx
-        .query_one(
-            "UPDATE vault.secrets SET \
-                current_version = $2, \
-                next_rotation_at = now() + make_interval(secs => $3::bigint), \
-                updated_at = now() \
-             WHERE id = $1::uuid \
-             RETURNING (SELECT created_at::text FROM vault.secret_versions \
-                 WHERE secret_id = $1::uuid AND version = $2)",
-            &[&id, &new_version, &interval_secs.unwrap_or(0)],
-        )
+    state
+        .store
+        .apply(Command::PutVersion {
+            name: name.to_string(),
+            expected_current: current_version,
+            version,
+            supersede_expires_at: Some(now + secret.grace_secs),
+            set_description: None,
+            set_rotation_interval_secs: None,
+            set_grace_secs: None,
+            next_rotation_at: NextRotation::Set(Some(now + interval)),
+            updated_at: now,
+        })
         .await?;
-    let created_at: String = created_at_row.get(0);
 
-    tx.commit().await?;
     audit(state, Some(actor), client_ip, "rotate", Some(name), "ok").await;
 
     Ok(SecretValue {
         name: name.to_string(),
-        kind,
-        format,
+        kind: secret.kind,
+        format: secret.format,
         version: new_version,
         value: payload.value,
         username: payload.username,
         password: payload.password,
-        created_at,
+        created_at: rfc3339(now),
     })
 }
 
@@ -440,52 +337,28 @@ pub async fn verify(
     client_ip: Ipv4Addr,
     presented: &str,
 ) -> ApiResult<VerifyResponse> {
-    let client = state.db.reader().await?;
-    let rows = client
-        .query(
-            "SELECT s.format, v.version, v.kms_key_id, v.wrapped_dek, v.nonce, v.ciphertext, v.aad \
-             FROM vault.secret_versions v \
-             JOIN vault.secrets s ON s.id = v.secret_id \
-             WHERE s.name = $1 AND (v.expires_at IS NULL OR v.expires_at > now()) \
-             ORDER BY v.version DESC",
-            &[&name],
-        )
-        .await?;
+    let now = now_unix();
 
-    for row in rows {
-        let format = parse_format(row.get::<_, String>(0))?;
-        let version: i32 = row.get(1);
-        let key_id: String = row.get(2);
-        let wrapped: Vec<u8> = row.get(3);
-        let nonce: Vec<u8> = row.get(4);
-        let ciphertext: Vec<u8> = row.get(5);
-        let aad: Vec<u8> = row.get(6);
-
-        let plaintext = open_version(
-            state,
-            name,
-            version,
-            &key_id,
-            &wrapped,
-            &nonce,
-            &aad,
-            &ciphertext,
-        )
-        .await?;
-        let matches = match format {
-            SecretFormat::Opaque => auth::fingerprints_match(presented.as_bytes(), &plaintext),
-            SecretFormat::Userpass => match decode_userpass(&plaintext) {
-                Ok(up) => auth::fingerprints_match(presented.as_bytes(), up.password.as_bytes()),
-                Err(_) => false,
-            },
-        };
-
-        if matches {
-            audit(state, None, Some(client_ip), "verify", Some(name), "valid").await;
-            return Ok(VerifyResponse {
-                valid: true,
-                version: Some(version),
-            });
+    if let Some(secret) = state.store.secret(name.to_string()).await? {
+        let versions = state.store.live_versions(name.to_string(), now).await?;
+        for version in versions {
+            let plaintext = open_version(state, name, version.version, &version).await?;
+            let matches = match secret.format {
+                SecretFormat::Opaque => auth::fingerprints_match(presented.as_bytes(), &plaintext),
+                SecretFormat::Userpass => match decode_userpass(&plaintext) {
+                    Ok(up) => {
+                        auth::fingerprints_match(presented.as_bytes(), up.password.as_bytes())
+                    }
+                    Err(_) => false,
+                },
+            };
+            if matches {
+                audit(state, None, Some(client_ip), "verify", Some(name), "valid").await;
+                return Ok(VerifyResponse {
+                    valid: true,
+                    version: Some(version.version),
+                });
+            }
         }
     }
 
@@ -503,6 +376,30 @@ pub async fn verify(
         valid: false,
         version: None,
     })
+}
+
+fn to_metadata(secret: SecretRecord) -> SecretMetadata {
+    SecretMetadata {
+        name: secret.name,
+        kind: secret.kind,
+        format: secret.format,
+        description: secret.description,
+        version: secret.current_version,
+        rotation_interval_secs: secret.rotation_interval_secs,
+        grace_period_secs: secret.grace_secs,
+        next_rotation_at: rfc3339_opt(secret.next_rotation_at),
+        created_at: rfc3339(secret.created_at),
+        updated_at: rfc3339(secret.updated_at),
+    }
+}
+
+async fn load_metadata(state: &AppState, name: &str) -> ApiResult<SecretMetadata> {
+    let secret = state
+        .store
+        .secret(name.to_string())
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(to_metadata(secret))
 }
 
 fn build_create_payload(req: &CreateSecretRequest) -> ApiResult<Payload> {
@@ -592,36 +489,13 @@ fn decode_payload(
     }
 }
 
-async fn load_userpass(
-    state: &AppState,
-    tx: &tokio_postgres::Transaction<'_>,
-    name: &str,
-    secret_id: &str,
-    version: i32,
-) -> ApiResult<UserPass> {
-    let row = tx
-        .query_one(
-            "SELECT kms_key_id, wrapped_dek, nonce, ciphertext, aad \
-             FROM vault.secret_versions WHERE secret_id = $1::uuid AND version = $2",
-            &[&secret_id, &version],
-        )
-        .await?;
-    let key_id: String = row.get(0);
-    let wrapped: Vec<u8> = row.get(1);
-    let nonce: Vec<u8> = row.get(2);
-    let ciphertext: Vec<u8> = row.get(3);
-    let aad: Vec<u8> = row.get(4);
-    let plaintext = open_version(
-        state,
-        name,
-        version,
-        &key_id,
-        &wrapped,
-        &nonce,
-        &aad,
-        &ciphertext,
-    )
-    .await?;
+async fn load_userpass(state: &AppState, name: &str, version: i32) -> ApiResult<UserPass> {
+    let record = state
+        .store
+        .version(name.to_string(), version)
+        .await?
+        .ok_or_else(|| ApiError::Internal(anyhow!("current version row missing")))?;
+    let plaintext = open_version(state, name, version, &record).await?;
     decode_userpass(&plaintext)
 }
 
@@ -630,108 +504,57 @@ async fn seal_version(
     name: &str,
     version: i32,
     plaintext: &[u8],
-) -> ApiResult<Sealed> {
+    now: i64,
+) -> ApiResult<VersionRecord> {
     let aad = aad_for(name, version);
     let version_str = version.to_string();
     let context = [("secret", name), ("version", version_str.as_str())];
     let data_key = state.kms.generate_data_key(&context).await?;
     let nonce = generate_nonce();
     let ciphertext = seal(&data_key.plaintext, &nonce, &aad, plaintext)?;
-    Ok(Sealed {
-        key_id: data_key.key_id,
+    Ok(VersionRecord {
+        version,
+        kms_key_id: data_key.key_id,
         wrapped_dek: data_key.wrapped,
         nonce: nonce.to_vec(),
         ciphertext,
         aad,
+        created_at: now,
+        expires_at: None,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn open_version(
     state: &AppState,
     name: &str,
     version: i32,
-    key_id: &str,
-    wrapped: &[u8],
-    nonce: &[u8],
-    stored_aad: &[u8],
-    ciphertext: &[u8],
+    record: &VersionRecord,
 ) -> ApiResult<Zeroizing<Vec<u8>>> {
     let aad = aad_for(name, version);
-    if stored_aad != aad {
+    if record.aad != aad {
         return Err(ApiError::Internal(anyhow!(
             "stored aad does not match secret identity (possible tampering)"
         )));
     }
-    let nonce: [u8; NONCE_LEN] = nonce
+    let nonce: [u8; NONCE_LEN] = record
+        .nonce
+        .as_slice()
         .try_into()
         .map_err(|_| ApiError::Internal(anyhow!("stored nonce has invalid length")))?;
-    let dek: Dek = match state.dek_cache.get(wrapped) {
+    let dek: Dek = match state.dek_cache.get(&record.wrapped_dek) {
         Some(dek) => dek,
         None => {
             let version_str = version.to_string();
             let context = [("secret", name), ("version", version_str.as_str())];
             let dek = state
                 .kms
-                .decrypt_data_key(wrapped, key_id, &context)
+                .decrypt_data_key(&record.wrapped_dek, &record.kms_key_id, &context)
                 .await?;
-            state.dek_cache.put(wrapped.to_vec(), dek.clone());
+            state.dek_cache.put(record.wrapped_dek.clone(), dek.clone());
             dek
         }
     };
-    Ok(open(&dek, &nonce, &aad, ciphertext)?)
-}
-
-async fn insert_version(
-    tx: &tokio_postgres::Transaction<'_>,
-    secret_id: &str,
-    version: i32,
-    sealed: &Sealed,
-) -> ApiResult<()> {
-    tx.execute(
-        "INSERT INTO vault.secret_versions \
-            (secret_id, version, kms_key_id, wrapped_dek, nonce, ciphertext, aad) \
-         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)",
-        &[
-            &secret_id,
-            &version,
-            &sealed.key_id,
-            &sealed.wrapped_dek,
-            &sealed.nonce,
-            &sealed.ciphertext,
-            &sealed.aad,
-        ],
-    )
-    .await?;
-    Ok(())
-}
-
-async fn load_metadata(state: &AppState, name: &str) -> ApiResult<SecretMetadata> {
-    let client = state.db.reader().await?;
-    let row = client
-        .query_opt(
-            "SELECT name, kind::text, format, description, current_version, \
-                EXTRACT(EPOCH FROM rotation_interval)::bigint, \
-                EXTRACT(EPOCH FROM grace_period)::bigint, \
-                next_rotation_at::text, created_at::text, updated_at::text \
-             FROM vault.secrets WHERE name = $1",
-            &[&name],
-        )
-        .await?
-        .ok_or(ApiError::NotFound)?;
-
-    Ok(SecretMetadata {
-        name: row.get(0),
-        kind: parse_kind(row.get::<_, String>(1))?,
-        format: parse_format(row.get::<_, String>(2))?,
-        description: row.get(3),
-        version: row.get(4),
-        rotation_interval_secs: row.get(5),
-        grace_period_secs: row.get::<_, Option<i64>>(6).unwrap_or(0),
-        next_rotation_at: row.get(7),
-        created_at: row.get(8),
-        updated_at: row.get(9),
-    })
+    Ok(open(&dek, &nonce, &aad, &record.ciphertext)?)
 }
 
 async fn audit(
@@ -742,49 +565,25 @@ async fn audit(
     secret_name: Option<&str>,
     outcome: &str,
 ) {
-    let ip_text = client_ip.map(|ip| ip.to_string());
-    let writer = match state.db.writer().await {
-        Ok(writer) => writer,
-        Err(_) => {
-            tracing::warn!(
-                actor = ?actor,
-                client_ip = ?ip_text,
-                action,
-                secret_name = ?secret_name,
-                outcome,
-                "audit not persisted (no writer); recorded to log only"
-            );
-            return;
-        }
+    let entry = AuditEntry {
+        at: now_unix(),
+        actor: actor.map(|s| s.to_string()),
+        client_ip: client_ip.map(|ip| ip.to_string()),
+        action: action.to_string(),
+        secret_name: secret_name.map(|s| s.to_string()),
+        outcome: outcome.to_string(),
+        node_id: 0,
     };
-    if let Err(err) = writer
-        .execute(
-            "INSERT INTO vault.audit_log (actor, client_ip, action, secret_name, outcome) \
-             VALUES ($1, $2::inet, $3, $4, $5)",
-            &[&actor, &ip_text, &action, &secret_name, &outcome],
-        )
-        .await
-    {
+    if let Err(err) = state.store.apply(Command::AppendAudit { entry }).await {
         tracing::warn!(
             error = %err,
             actor = ?actor,
-            client_ip = ?ip_text,
             action,
             secret_name = ?secret_name,
             outcome,
-            "audit insert failed; recorded to log only"
+            "audit not persisted; recorded to log only"
         );
     }
-}
-
-fn parse_kind(value: String) -> ApiResult<SecretKind> {
-    SecretKind::parse(&value)
-        .ok_or_else(|| ApiError::Internal(anyhow!("unknown secret kind '{value}' in database")))
-}
-
-fn parse_format(value: String) -> ApiResult<SecretFormat> {
-    SecretFormat::parse(&value)
-        .ok_or_else(|| ApiError::Internal(anyhow!("unknown secret format '{value}' in database")))
 }
 
 fn validate_name(name: &str) -> ApiResult<()> {
@@ -829,15 +628,6 @@ fn normalize_grace(grace: Option<i64>) -> ApiResult<i64> {
             "grace_period_secs must not be negative".into(),
         )),
     }
-}
-
-fn insert_conflict(err: tokio_postgres::Error, name: &str) -> ApiError {
-    if let Some(db_err) = err.as_db_error() {
-        if db_err.code() == &SqlState::UNIQUE_VIOLATION {
-            return ApiError::Conflict(format!("secret '{name}' already exists"));
-        }
-    }
-    ApiError::Internal(anyhow::Error::new(err))
 }
 
 #[cfg(test)]

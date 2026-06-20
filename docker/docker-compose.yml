@@ -1,116 +1,64 @@
 name: hyperion-vault
 
-x-node-env: &node-env
-  PGDATA: "/var/lib/postgresql/data"
-  RAFT_PORT: "7400"
-  PEERS: "1@node1:7400,2@node2:7400,3@node3:7400"
-  PG_ADDRS: "1@node1:5432,2@node2:5432,3@node3:5432"
-  SEED_HOST: "node1"
-  SU_PASSWORD: "${SU_PASSWORD:-pgr_super_pw}"
-  REPL_PASSWORD: "${REPL_PASSWORD:-pgr_repl_pw}"
-  APP_USER: "${VAULT_SERVICE_USER:-vault_service}"
-  APP_PASSWORD: "${VAULT_SERVICE_PASSWORD:-vault_service_pw}"
-  APP_DB: "${APP_DB:-postgres}"
-  SYNCHRONOUS: "${SYNCHRONOUS:-on}"
-  RAFT_DIR: "/var/lib/postgresql/raft"
-
-x-node-base: &node-base
-  image: hyperion-vault:local
-  build:
-    context: ..
-    dockerfile: docker/Dockerfile
-    args:
-      PG_REPLICA_IMAGE: "${PG_REPLICA_IMAGE:-pg-replica-paradedb:local}"
-  init: true
-  cap_add: [NET_ADMIN]
-  networks: [vault]
-  restart: unless-stopped
-
-x-api-env: &api-env
-  VAULT_API_LISTEN: "0.0.0.0:8200"
-  VAULT_ALLOWED_IPS: "${VAULT_ALLOWED_IPS:-0.0.0.0/0}"
-  VAULT_TRUST_PROXY: "false"
-  VAULT_PG_PORT: "5432"
-  VAULT_PG_USER: "${VAULT_SERVICE_USER:-vault_service}"
-  VAULT_PG_PASSWORD: "${VAULT_SERVICE_PASSWORD:-vault_service_pw}"
-  VAULT_PG_DBNAME: "${APP_DB:-postgres}"
+x-vault-env: &vault-env
+  VAULT_PEERS: "1=vault1:7400,2=vault2:7400,3=vault3:7400"
+  VAULT_API_PORT: "8200"
+  VAULT_DB_PATH: "/data/vault.redb"
   VAULT_KMS_MODE: "local"
   VAULT_LOCAL_MASTER_KEY: "${VAULT_LOCAL_MASTER_KEY:?set VAULT_LOCAL_MASTER_KEY in docker/.env}"
+  VAULT_ALLOWED_IPS: "${VAULT_ALLOWED_IPS:-0.0.0.0/0}"
+  VAULT_TRUST_PROXY: "false"
+  VAULT_READ_CONSISTENCY: "${VAULT_READ_CONSISTENCY:-local}"
   VAULT_DEK_CACHE_TTL_SECS: "${VAULT_DEK_CACHE_TTL_SECS:-300}"
   VAULT_ROTATION_POLL_SECS: "10"
   RUST_LOG: "${RUST_LOG:-info}"
 
-x-api-base: &api-base
-  image: hyperion-vault:local
-  command: ["hyperion-vault-api"]
-  networks: [vault]
-  restart: unless-stopped
-
 services:
-  node1:
-    <<: *node-base
-    container_name: hv-node1
+  vault1:
+    image: hyperion-vault:local
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    init: true
+    networks: [vault]
+    restart: unless-stopped
+    container_name: hv-vault1
     environment:
-      <<: *node-env
+      <<: *vault-env
       NODE_ID: "1"
-    volumes: [node1pg:/var/lib/postgresql]
-    ports: ["5432:5432"]
-
-  node2:
-    <<: *node-base
-    container_name: hv-node2
-    depends_on: [node1]
-    environment:
-      <<: *node-env
-      NODE_ID: "2"
-    volumes: [node2pg:/var/lib/postgresql]
-    ports: ["5433:5432"]
-
-  node3:
-    <<: *node-base
-    container_name: hv-node3
-    depends_on: [node1]
-    environment:
-      <<: *node-env
-      NODE_ID: "3"
-    volumes: [node3pg:/var/lib/postgresql]
-    ports: ["5434:5432"]
-
-  api1:
-    <<: *api-base
-    container_name: hv-api1
-    depends_on: [node1]
-    environment:
-      <<: *api-env
-      VAULT_PG_HOSTS: "node1,node2,node3"
-      VAULT_NODE_NAME: "api1"
+    volumes: [vault1data:/data]
     ports: ["8200:8200"]
 
-  api2:
-    <<: *api-base
-    container_name: hv-api2
-    depends_on: [node2]
+  vault2:
+    image: hyperion-vault:local
+    init: true
+    networks: [vault]
+    restart: unless-stopped
+    container_name: hv-vault2
+    depends_on: [vault1]
     environment:
-      <<: *api-env
-      VAULT_PG_HOSTS: "node2,node3,node1"
-      VAULT_NODE_NAME: "api2"
+      <<: *vault-env
+      NODE_ID: "2"
+    volumes: [vault2data:/data]
     ports: ["8201:8200"]
 
-  api3:
-    <<: *api-base
-    container_name: hv-api3
-    depends_on: [node3]
+  vault3:
+    image: hyperion-vault:local
+    init: true
+    networks: [vault]
+    restart: unless-stopped
+    container_name: hv-vault3
+    depends_on: [vault1]
     environment:
-      <<: *api-env
-      VAULT_PG_HOSTS: "node3,node1,node2"
-      VAULT_NODE_NAME: "api3"
+      <<: *vault-env
+      NODE_ID: "3"
+    volumes: [vault3data:/data]
     ports: ["8202:8200"]
-
-volumes:
-  node1pg:
-  node2pg:
-  node3pg:
 
 networks:
   vault:
-    driver: bridge
+
+volumes:
+  vault1data:
+  vault2data:
+  vault3data:

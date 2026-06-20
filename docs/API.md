@@ -56,7 +56,7 @@ fully manage `stripe/...` secrets and nothing else.
 ### Lockout
 
 Auth/authz failures (missing/invalid token, IP-denied read, permission denied)
-are counted **per client IP, cluster-wide** in Postgres. After
+are counted **per client IP, per node**. After
 `VAULT_AUTH_MAX_FAILURES` within `VAULT_AUTH_WINDOW_SECS`, the IP is locked and
 every request from it returns `429` until `VAULT_AUTH_LOCKOUT_SECS` elapse. Set
 `VAULT_AUTH_MAX_FAILURES=0` to disable.
@@ -242,14 +242,11 @@ sets `revoked_at` (`204`).
 
 ### Bootstrap the first token
 
-Issuing tokens needs an admin token, so seed the first one in SQL (the `admin`
-role is created at install):
-
-```sql
--- fingerprint = sha256(token bytes)
-SELECT vault.add_token('root', 'admin', decode('<sha256-hex-of-token>', 'hex'));
-```
+Issuing tokens needs an admin token. Seed the first one by starting the node(s)
+with `VAULT_BOOTSTRAP_TOKEN=<token>` set (the same value on every node): on
+startup it creates a `bootstrap-admin` token mapped to the built-in `admin` role.
+Use it to create real per-service tokens via `POST /v1/tokens`, then rotate it.
 
 ### `GET /healthz` / `GET /readyz`
 
-Liveness (`ok`) and readiness (`ready`, checks a DB connection).
+Liveness (`ok`) and readiness (`ready`, checks the local store).

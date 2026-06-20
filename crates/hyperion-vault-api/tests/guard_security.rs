@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Body;
 use axum::extract::ConnectInfo;
@@ -8,24 +11,32 @@ use tower::ServiceExt;
 
 use hyperion_vault_api::config::{Config, KmsMode};
 
+static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_db_path() -> String {
+    let n = DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut path: PathBuf = std::env::temp_dir();
+    path.push(format!("hv-test-{}-{}.redb", std::process::id(), n));
+    let _ = std::fs::remove_file(&path);
+    path.to_string_lossy().into_owned()
+}
+
 fn test_config(allowed_ips: &str) -> Config {
     Config {
-        listen: "127.0.0.1:0".parse().unwrap(),
+        node_id: 1,
+        peers: BTreeMap::new(),
+        api_listen: "127.0.0.1:0".parse().unwrap(),
+        db_path: temp_db_path(),
+        bootstrap_token: None,
         allowed_ips: allowed_ips.to_string(),
         trust_proxy: false,
-        pg_hosts: vec!["127.0.0.1".to_string()],
-        pg_port: 5432,
-        pg_user: "vault_service".to_string(),
-        pg_password: String::new(),
-        pg_dbname: "postgres".to_string(),
-        pool_max: 1,
+        read_consistency_linearizable: false,
         kms_mode: KmsMode::Local,
         kms_key_id: String::new(),
         local_master_key_b64: None,
         rotation_poll_secs: 60,
         dek_cache_ttl_secs: 0,
         kms_max_retries: 0,
-        node_name: "test".to_string(),
         auth_max_failures: 0,
         auth_lockout_secs: 900,
         auth_window_secs: 300,

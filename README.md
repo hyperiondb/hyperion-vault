@@ -1,22 +1,24 @@
 # HyperionDB Vault (`hyperion-vault`)
 
-A **PostgreSQL secrets vault** for HyperionDB clusters: a `CREATE EXTENSION`
-that stores secrets **encrypted at rest** plus a co-located **REST API** to
-create, read, update, delete, and **automatically rotate** them.
+A **self-contained, replicated secrets vault**: a single Rust binary that stores
+secrets **encrypted at rest** on local disk and exposes a **REST API** to
+create, read, update, delete, verify, and **automatically rotate** them.
 
 Secrets are sealed with **envelope encryption** — a per-secret data key (DEK)
 protected by **AWS KMS**, with the secret bytes sealed under
-**XChaCha20-Poly1305**. PostgreSQL only ever stores
-ciphertext, the wrapped DEK, and a nonce; plaintext never touches disk or WAL.
+**XChaCha20-Poly1305**. Only ciphertext, the wrapped DEK, and a nonce are ever
+written to disk; plaintext never lands on disk.
 
-Built to run **on every member of a [`hyperiondb`](https://github.com/hyperiondb/hyperiondb) cluster**:
-reads are served locally from any node, while writes are transparently routed
-to the current primary and replicated byte-for-byte to the rest.
+Storage is an embedded **[redb](https://github.com/cberner/redb)** key-value
+store (one file per node). High availability comes from **[openraft](https://github.com/databendlabs/openraft)**:
+the vault runs as a Raft cluster, writes go through consensus to the leader and
+replicate to a quorum, and reads are served locally from any node. There is no
+external database to operate.
 
-Comparable to [supabase/vault](https://github.com/supabase/vault) (in-database
-secrets) and [OpenBao](https://openbao.org/) (KMS-backed envelope encryption +
-API + rotation) — this project combines both models for a replicated Postgres
-cluster.
+Comparable to [supabase/vault](https://github.com/supabase/vault) and
+[OpenBao](https://openbao.org/) (KMS-backed envelope encryption + API +
+rotation) — this project packages that model as a small, dependency-free,
+self-replicating cluster.
 
 Status: **in progress**
 
@@ -26,47 +28,39 @@ Status: **in progress**
 
 - **Encryption at rest, KMS-backed.** Envelope encryption: AWS KMS wraps a
   256-bit data key (via `GenerateDataKey`/`Decrypt`); the secret is sealed with
-  XChaCha20-Poly1305. Postgres stores only `{wrapped_dek, nonce, ciphertext}`.
+  XChaCha20-Poly1305. Disk stores only `{wrapped_dek, nonce, ciphertext, aad}`.
+- **Embedded storage (redb).** Each node owns a single redb file — no Postgres,
+  no external services. The Raft log, snapshots, and the secret state all live
+  in that one embedded store.
+- **Raft replication & failover (openraft).** Writes are committed through Raft
+  to the leader and replicated to a quorum; leader election provides automatic
+  failover. Reads are served from the local node (optionally linearizable
+  through the leader via `VAULT_READ_CONSISTENCY=linearizable`).
 - **Two secret kinds.**
   - **`manual`** — set and changed explicitly through the API.
-  - **`automatic`** — rotated on a schedule by a background worker. Old
-    versions stay valid for a configurable **grace period**, so dependent
-    services can keep authenticating with the previous secret during cutover.
+  - **`automatic`** — rotated on a schedule by a background worker (running only
+    on the leader). Old versions stay valid for a configurable **grace period**.
 - **REST API.** `POST/GET/PUT/DELETE /v1/secrets`, plus `/rotate` and a
   constant-time `/verify` endpoint for grace-window validation.
-- **Cluster-native (works with `hyperiondb`).** The API runs on every node.
-  **Reads** (`GET`, `verify`) are served from the local node; **writes**
-  (create/update/delete/rotate) are routed to the **current primary** via a
-  multi-host libpq pool with `target_session_attrs=read-write`, so they work
-  from *any* member and follow failover automatically.
 - **IP allowlist for reads.** Secret reads are permitted only from an
-  IPv4/CIDR allowlist supplied via `VAULT_ALLOWED_IPS`. **Fail-closed**: an
-  empty allowlist denies all reads.
+  IPv4/CIDR allowlist (`VAULT_ALLOWED_IPS`). **Fail-closed**: an empty allowlist
+  denies all reads.
 - **Role-based access control (RBAC).** `create/update/delete/rotate` and
   role/token administration require a bearer token. Each token maps to a
-  **role** whose permission rules are `action × secret-path glob` — e.g. a
-  `payment` role scoped to `stripe/*` — with a built-in `admin` superuser role
-  that manages roles and tokens. Tokens are stored only as SHA-256 fingerprints
-  and checked in constant time. Reads stay IP-allowlisted (not RBAC-gated).
+  **role** whose rules are `action × secret-path glob` (e.g. a `payment` role
+  scoped to `stripe/*`), with a built-in `admin` superuser role. Tokens are
+  stored only as SHA-256 fingerprints and checked in constant time.
 - **Brute-force lockout.** Auth/authz failures are counted per client IP
-  **cluster-wide** (in Postgres); after `VAULT_AUTH_MAX_FAILURES` the IP is
-  locked out (HTTP `429`) for `VAULT_AUTH_LOCKOUT_SECS`.
-- **Automatic rotation.** An in-database background worker (running only on the
-  primary) enqueues due rotations and `NOTIFY`s; the API's rotation worker
-  performs the re-encryption and expires superseded versions after grace.
+  (per node); after `VAULT_AUTH_MAX_FAILURES` the IP is locked out (HTTP `429`)
+  for `VAULT_AUTH_LOCKOUT_SECS`.
 - **KMS-outage resilience.** Unwrapped data keys are cached in memory for
-  `VAULT_DEK_CACHE_TTL_SECS`, so reads of previously-read secrets keep working
-  even if AWS KMS is briefly unavailable, and KMS calls are retried with
-  exponential backoff up to `VAULT_KMS_MAX_RETRIES` to ride out rate-limits.
+  `VAULT_DEK_CACHE_TTL_SECS`, and KMS calls are retried with exponential backoff
+  up to `VAULT_KMS_MAX_RETRIES`.
 - **Audit log.** Every operation is recorded (actor, client IP, action,
-  outcome) in `vault.audit_log`.
-- **Defense in depth.** Row-level security on every table, a dedicated service
-  role, version-bound AEAD associated data (a ciphertext can't be replayed
-  under another secret name or version), and zeroized key material in memory.
-- **Extensive security tests.** The `hyperion-vault-core` crate carries a
-  property-style security suite (tamper detection, nonce uniqueness, AAD
-  binding, fail-closed allowlist, constant-time tokens, grace-window
-  correctness); a Docker-based end-to-end suite covers the API and cluster.
+  outcome) in a local `audit_log` table per node.
+- **Defense in depth.** Application-enforced access invariants, version-bound
+  AEAD associated data (a ciphertext can't be replayed under another secret name
+  or version), and zeroized key material in memory.
 
 ---
 
@@ -74,65 +68,61 @@ Status: **in progress**
 
 | Crate / dir | Kind | Purpose |
 |-------------|------|---------|
-| `crates/hyperion-vault-core` | lib | Pure-Rust security core: AEAD envelope, IP allowlist, token auth, rotation policy. No DB, no network — fully unit-testable. |
-| `crates/hyperion-vault-api` | bin | The REST API service (`axum`): handlers, IP/token guards, dual DB pools, KMS, rotation worker. |
-| `crates/hyperion-vault` | lib | Umbrella crate re-exporting the security core as a single dependency. |
-| `extension/` (`hyperion_vault`) | cdylib | The pgrx PostgreSQL extension: `vault` schema, RLS, helper functions, rotation supervisor background worker. |
+| `crates/hyperion-vault-core` | lib | Pure-Rust security core: AEAD envelope, IP allowlist, token auth, rotation policy. No storage, no network. |
+| `crates/hyperion-vault-api` | bin | The REST API service (`axum`): handlers, IP/token guards, the redb store (`store/`), the Raft layer (`raft/`), KMS, rotation worker. |
+| `crates/hyperion-vault` | lib | Umbrella crate re-exporting the security core. |
 | `docs/` | — | Architecture, decisions, threat model, API and security docs. |
-| `docker/` | — | Node image (built on the `pg_replica` image) + 3-node cluster compose + e2e overlay. |
-| `scripts/` | — | `test.sh`, `test-security.sh`, and the `e2e/` cluster suite. |
-| `packaging/` | — | `.deb` build + signed apt-repo assembly (mirrors `pg_replica`). |
+| `docker/` | — | Single-binary node image + N-node Raft cluster compose + WireGuard overlay + e2e overlay. |
 
-The encryption algorithm choice (XChaCha20-Poly1305), the application-layer
-(vs in-database) encryption decision, and the primary-routing strategy are
-documented in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+The storage layer is built around a **ports & adapters** seam: the service layer
+depends only on the `VaultReader` / `VaultWriter` traits (`store/ports.rs`). The
+single-node `RedbStore` and the Raft-backed `RaftStore` are interchangeable
+adapters; both funnel every mutation through one deterministic `apply_command`.
+See [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ---
 
-## How it fits with `pg_replica`
+## Architecture
 
-`pg_replica` (HyperionDB) provides **physical streaming replication** with
-Raft-based automatic failover. Standbys are byte-for-byte copies and are
-**read-only**; only the primary accepts writes. Roles, DDL, and table data all
-replicate.
+```
+          ┌─ vault1 ─┐   ┌─ vault2 ─┐   ┌─ vault3 ─┐
+client ──>│  API     │   │  API     │   │  API     │   reads: local redb
+          │  redb    │<=>│  redb    │<=>│  redb    │   writes: Raft → leader
+          └──────────┘   └──────────┘   └──────────┘            → quorum → apply
+                    openraft consensus (HTTP RPC)
+```
 
-Vault leverages this directly:
-
-- `CREATE EXTENSION hyperion_vault` on the primary creates the `vault` schema;
-  the DDL **replicates to every node** automatically.
-- Encrypted secret rows replicate like any other table → **any node can serve
-  reads** (and decrypt locally via KMS).
-- The API's writer pool uses `target_session_attrs=read-write`, so
-  create/update/delete/rotate from **any node** land on the **current primary**
-  and follow failover with no client changes.
+- The **leader** is the equivalent of a primary: it accepts writes, replicates
+  the log to followers, and runs the rotation worker. A follower transparently
+  forwards writes to the current leader.
+- Each node persists everything to its own redb file (`VAULT_DB_PATH`).
+- Nodes find each other through `VAULT_PEERS` (an `id=host:port` cluster map,
+  identical on every node); a node's own identity is `NODE_ID`.
 
 ---
 
 ## Quick start (local dev, no AWS)
 
 ```bash
-# 1. Build + test the security core (no Postgres needed)
-cargo test -p hyperion-vault-core
+# Build + test the security core and store (no cluster needed)
+cargo test --workspace
 
-# 2. Build the pg_replica cluster image first (sibling repo)
-cd pg_replica && docker compose -f docker/docker-compose.yml build
-
-# 3. Bring up a 3-node cluster with vault + an API sidecar on each node
+# Bring up a 3-node Raft cluster (KMS in local dev mode)
 cd docker && cp .env.example .env && docker compose up --build
-
-# 4. Run the end-to-end suite (CRUD, auth, replicated reads, rotation)
-bash scripts/e2e.sh        # from the repo root
 ```
 
-APIs listen on `localhost:8200` (node1), `:8201` (node2), `:8202` (node3). See
-
-[`docs/API.md`](docs/API.md) for full request/response examples and
-[`docker/`](docker/) for the cluster topology.
+APIs listen on `localhost:8200` (vault1), `:8201` (vault2), `:8202` (vault3);
+Raft RPC runs on the internal `:7400` of each node. See
+[`docs/API.md`](docs/API.md) for full request/response examples.
 
 ```bash
-# Create a manual secret (admin token required)
+# Mint a first admin token by setting VAULT_BOOTSTRAP_TOKEN on the nodes,
+# then use it (the dev compose seeds 'dev-admin-token-change-me' via the e2e overlay):
+TOKEN=dev-admin-token-change-me
+
+# Create a manual secret
 curl -sS -X POST localhost:8200/v1/secrets \
-  -H "Authorization: Bearer $VAULT_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
   -d '{"name":"db/password","kind":"manual","value":"s3cr3t"}'
 
@@ -141,7 +131,7 @@ curl -sS localhost:8200/v1/secrets/db/password
 
 # Create an auto-rotating secret with a 24h interval and 1h grace
 curl -sS -X POST localhost:8200/v1/secrets \
-  -H "Authorization: Bearer $VAULT_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
   -d '{"name":"svc/api-key","kind":"automatic","rotation_interval_secs":86400,"grace_period_secs":3600}'
 ```
@@ -152,33 +142,28 @@ curl -sS -X POST localhost:8200/v1/secrets \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VAULT_API_LISTEN` | `0.0.0.0:8200` | API bind address. |
+| `NODE_ID` | `1` | This node's id (Raft node id + audit label). The only value that differs per node. |
+| `VAULT_PEERS` | *(empty)* | Cluster map `id=host:port,…` of the **Raft** addresses, identical on every node. One entry (or empty) ⇒ single-node, Raft disabled; two or more ⇒ replicated cluster. |
+| `VAULT_API_PORT` | `8200` | Public REST API bind port (`0.0.0.0:PORT`). The external address is whatever your load balancer / port mapping exposes. |
+| `VAULT_DB_PATH` | `vault.redb` | Path to this node's redb file. |
+| `VAULT_BOOTSTRAP_TOKEN` | — | If set, seeds a `bootstrap-admin` token (mapped to the built-in `admin` role) on startup. Set the same value on every node for a fresh cluster, then rotate it. |
 | `VAULT_ALLOWED_IPS` | *(empty → deny all reads)* | Comma-separated IPv4 / CIDR allowed to **read** secrets. |
 | `VAULT_TRUST_PROXY` | `false` | Trust `X-Forwarded-For` for the client IP (only behind a trusted proxy). |
-| `VAULT_PG_HOSTS` | `127.0.0.1` | Comma-separated cluster hosts (multi-host libpq). |
-| `VAULT_PG_PORT` | `5432` | Postgres port. |
-| `VAULT_PG_USER` / `VAULT_PG_PASSWORD` / `VAULT_PG_DBNAME` | `vault_service` / — / `postgres` | Service-role connection. |
+| `VAULT_READ_CONSISTENCY` | `local` | `local` (read from this node) or `linearizable` (route reads through the leader). |
 | `VAULT_KMS_MODE` | `aws` | `aws` (production) or `local` (dev only). |
 | `VAULT_KMS_KEY_ID` | — | AWS KMS key id/ARN (required for `aws`). |
 | `VAULT_LOCAL_MASTER_KEY` | — | base64 32-byte master key for `local` mode. |
-| `VAULT_ROTATION_POLL_SECS` | `15` | How often the API worker claims rotation jobs. |
-| `VAULT_DEK_CACHE_TTL_SECS` | `300` | TTL of the in-memory decrypted-DEK cache; lets previously-read secrets survive a KMS outage. `0` disables. |
-| `VAULT_KMS_MAX_RETRIES` | `5` | Retry KMS calls (writes always; reads on a cache miss) up to N times with exponential backoff, to ride out rate-limits/brief outages. `0` disables. |
-| `VAULT_AUTH_MAX_FAILURES` | `5` | Failed auth/authz attempts (per client IP) before lockout. `0` disables the lockout. |
-| `VAULT_AUTH_LOCKOUT_SECS` | `900` | How long a locked-out IP stays locked (auto-expires). |
-| `VAULT_AUTH_WINDOW_SECS` | `300` | Window over which failures accumulate toward `VAULT_AUTH_MAX_FAILURES`. |
+| `VAULT_ROTATION_POLL_SECS` | `15` | How often the leader scans for due rotations. |
+| `VAULT_DEK_CACHE_TTL_SECS` | `300` | TTL of the in-memory decrypted-DEK cache. `0` disables. |
+| `VAULT_KMS_MAX_RETRIES` | `5` | Retry KMS calls up to N times with exponential backoff. `0` disables. |
+| `VAULT_AUTH_MAX_FAILURES` | `5` | Failed auth/authz attempts (per client IP) before lockout. `0` disables. |
+| `VAULT_AUTH_LOCKOUT_SECS` | `900` | How long a locked-out IP stays locked. |
+| `VAULT_AUTH_WINDOW_SECS` | `300` | Window over which failures accumulate. |
 
-The extension is configured via GUCs: `hyperion_vault.rotation_enabled`,
-`hyperion_vault.scan_interval_secs`, `hyperion_vault.database`.
-
----
-
-## Install (Debian/Ubuntu)
-
-```bash
-curl -fsSL https://hyperiondb.github.io/hyperion-vault/install.sh | sudo bash
-sudo apt-get install -y postgresql-18-hyperion-vault
-```
+For AWS mode, AWS credentials and region come from the standard AWS SDK
+environment (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, or an
+instance role) — not from `VAULT_*` variables. The key's IAM policy needs only
+`kms:GenerateDataKey` and `kms:Decrypt`.
 
 ---
 
@@ -191,12 +176,11 @@ and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before deploying.
 
 - [docs/DECISIONS.md](docs/DECISIONS.md) - decisions
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - architecture
-- [docs/SECURITY.md](docs/SECURITY.md) - Security
-- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) - Threat model
+- [docs/SECURITY.md](docs/SECURITY.md) - security
+- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) - threat model
 - [docs/API.md](docs/API.md) - REST API
-- [docs/WIREGUARD.md](docs/WIREGUARD.md) - Optional admin access over WireGuard
+- [docs/WIREGUARD.md](docs/WIREGUARD.md) - optional admin access over WireGuard
 
 ## License
 
 GPL-3.0-or-later. See [`LICENCE`](LICENCE).
-fdebiam

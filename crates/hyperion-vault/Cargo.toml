@@ -9,7 +9,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "HyperionDB Vault: encrypted secrets store for PostgreSQL clusters. Umbrella crate re-exporting the hyperion-vault security core."
+description = "HyperionDB Vault: encrypted, Raft-replicated secrets store. Umbrella crate re-exporting the hyperion-vault security core."
 
 [dependencies]
 hyperion-vault-core.workspace = true

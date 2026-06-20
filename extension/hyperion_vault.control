@@ -1,5 +1,0 @@
-comment = 'Encrypted secrets vault for PostgreSQL (KMS envelope encryption, REST API, automatic rotation)'
-default_version = '@CARGO_VERSION@'
-module_pathname = '$libdir/hyperion_vault'
-relocatable = false
-superuser = true
