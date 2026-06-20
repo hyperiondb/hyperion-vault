@@ -89,6 +89,7 @@ impl FromRequestParts<SharedState> for ReaderGuard {
         match ip {
             IpAddr::V4(v4) if state.allowlist.contains(v4) => Ok(ReaderGuard { client_ip: v4 }),
             _ => {
+                tracing::warn!(client_ip = %ip, "read denied: client IP not in VAULT_ALLOWED_IPS");
                 lockout::record(state, Some(ip)).await;
                 Err(ApiError::Forbidden)
             }
