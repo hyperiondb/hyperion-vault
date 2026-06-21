@@ -288,6 +288,11 @@ impl VaultReader for RedbStore {
         })
         .await
     }
+
+    async fn dump(&self) -> StoreResult<super::backup::BackupData> {
+        let db = self.db.clone();
+        blocking(move || super::backup::dump_database(&db)).await
+    }
 }
 
 #[async_trait]
@@ -308,5 +313,10 @@ impl VaultWriter for RedbStore {
             Ok(result) => result,
             Err(join_err) => Err(StoreError::Internal(anyhow!(join_err))),
         }
+    }
+
+    async fn restore(&self, data: super::backup::BackupData) -> StoreResult<()> {
+        let db = self.db.clone();
+        blocking(move || super::backup::restore_database(&db, &data)).await
     }
 }

@@ -11,8 +11,8 @@ use super::store::{LogStore, StateMachine};
 use super::types::{ApplyResult, NodeId, Raft};
 use crate::store::engine::RedbStore;
 use crate::store::{
-    Command, LockoutRecord, RoleRecord, SecretRecord, StoreError, StoreResult, TokenRecord,
-    VaultReader, VaultWriter, VersionRecord,
+    BackupData, Command, LockoutRecord, RoleRecord, SecretRecord, StoreError, StoreResult,
+    TokenRecord, VaultReader, VaultWriter, VersionRecord,
 };
 
 pub struct RaftNode {
@@ -171,6 +171,9 @@ impl VaultReader for RaftStore {
     async fn lockout(&self, ip: String) -> StoreResult<Option<LockoutRecord>> {
         self.node.store.lockout(ip).await
     }
+    async fn dump(&self) -> StoreResult<BackupData> {
+        self.node.store.dump().await
+    }
 }
 
 #[async_trait]
@@ -181,5 +184,8 @@ impl VaultWriter for RaftStore {
         } else {
             self.node.write(command).await
         }
+    }
+    async fn restore(&self, data: BackupData) -> StoreResult<()> {
+        self.node.store.restore(data).await
     }
 }

@@ -5,10 +5,30 @@ use crate::dto::{
     CreateRoleRequest, CreateTokenRequest, PermissionRule, RoleInfo, TokenCreated, TokenInfo,
 };
 use crate::error::{ApiError, ApiResult};
+use crate::service::audit;
 use crate::state::AppState;
-use crate::store::{Command, RoleRecord, TokenRecord};
+use crate::store::backup::BACKUP_VERSION;
+use crate::store::{BackupData, Command, RoleRecord, TokenRecord};
 
 const BUILTIN_ADMIN_ROLE: &str = "admin";
+
+pub async fn backup(state: &AppState, actor: &str) -> ApiResult<BackupData> {
+    let data = state.store.dump().await?;
+    audit(state, Some(actor), None, "backup", None, "ok").await;
+    Ok(data)
+}
+
+pub async fn restore(state: &AppState, actor: &str, data: BackupData) -> ApiResult<()> {
+    if data.version != BACKUP_VERSION {
+        return Err(ApiError::BadRequest(format!(
+            "unsupported backup version {} (this build restores version {BACKUP_VERSION})",
+            data.version
+        )));
+    }
+    state.store.restore(data).await?;
+    audit(state, Some(actor), None, "restore", None, "ok").await;
+    Ok(())
+}
 
 pub async fn create_role(state: &AppState, req: CreateRoleRequest) -> ApiResult<RoleInfo> {
     validate_role_name(&req.name)?;

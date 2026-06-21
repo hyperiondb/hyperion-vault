@@ -12,7 +12,10 @@ use crate::dto::{
 use crate::error::{ApiError, ApiResult};
 use crate::guards::{AdminActor, ReaderGuard};
 use crate::state::SharedState;
+use crate::store::BackupData;
 use crate::{authz, manage, service};
+
+const RESTORE_BODY_LIMIT: usize = 256 << 20;
 
 pub fn router(state: SharedState) -> Router {
     Router::new()
@@ -31,6 +34,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/roles/{name}/permissions", put(set_permissions))
         .route("/v1/tokens", post(create_token).get(list_tokens))
         .route("/v1/tokens/{name}", delete(revoke_token))
+        .route("/v1/backup", get(backup))
+        .route(
+            "/v1/restore",
+            post(restore).layer(DefaultBodyLimit::max(RESTORE_BODY_LIMIT)),
+        )
         .layer(DefaultBodyLimit::max(1 << 20))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -200,6 +208,24 @@ async fn revoke_token(
 ) -> ApiResult<StatusCode> {
     authz::require_admin(&state, &actor).await?;
     manage::revoke_token(&state, &name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn backup(
+    State(state): State<SharedState>,
+    actor: AdminActor,
+) -> ApiResult<Json<BackupData>> {
+    authz::require_admin(&state, &actor).await?;
+    Ok(Json(manage::backup(&state, &actor.name).await?))
+}
+
+async fn restore(
+    State(state): State<SharedState>,
+    actor: AdminActor,
+    Json(data): Json<BackupData>,
+) -> ApiResult<StatusCode> {
+    authz::require_admin(&state, &actor).await?;
+    manage::restore(&state, &actor.name, data).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

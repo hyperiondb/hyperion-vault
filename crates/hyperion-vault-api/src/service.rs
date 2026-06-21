@@ -604,7 +604,7 @@ async fn open_version(
     Ok(open(&dek, &nonce, &aad, &record.ciphertext)?)
 }
 
-async fn audit(
+pub(crate) async fn audit(
     state: &AppState,
     actor: Option<&str>,
     client_ip: Option<Ipv4Addr>,
