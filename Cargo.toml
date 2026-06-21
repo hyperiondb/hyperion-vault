@@ -9,7 +9,7 @@ members = [
 [workspace.package]
 version = "0.7.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-only"
 authors = ["Tadas Talaikis <info@nordlet.com>"]
 repository = "https://github.com/hyperiondb/hyperion-vault"
 homepage="https://hyperiondb.eu/"
