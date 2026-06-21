@@ -4,10 +4,12 @@ Base URL: `http://<node>:8200`. All bodies are JSON.
 
 - **Reads** (`GET /v1/secrets/{name}`, `POST /v1/secrets/{name}/verify`) require
   the client IP to be in `VAULT_ALLOWED_IPS`. Reads are **not** RBAC-gated.
-- **Management** (`POST/PUT/DELETE /v1/secrets`, `/rotate`) and **role/token
-  administration** require `Authorization: Bearer <token>`. Each token maps to a
-  **role** whose permissions decide which actions it may take on which secret
-  paths — see [Roles & access control](#roles--access-control).
+- **Management** (`POST/PUT/DELETE /v1/secrets`, `/rotate`), **role/token
+  administration**, and **backup/restore** (`GET /v1/backup`, `POST /v1/restore`)
+  require `Authorization: Bearer <token>`. Each token maps to a **role** whose
+  permissions decide which actions it may take on which secret paths — see
+  [Roles & access control](#roles--access-control). Backup/restore require the
+  built-in `admin` role.
 - Repeated auth/authz failures from an IP trigger a **lockout** (HTTP `429`).
 
 ## Errors
@@ -258,6 +260,50 @@ Body — a list of names:
 Returns an array of `SecretValue` (same shape as `GET /v1/secrets/{name}`) for the
 names that exist; missing names are omitted. IP-allowlisted like single reads (not
 RBAC-gated). Capped at 256 names per request.
+
+### Backup & restore *(admin role only)*
+
+Both require a token whose role is `is_admin`; otherwise `403`. No cron or
+background worker is involved — backup and restore are plain API calls.
+
+#### `GET /v1/backup` — export a full snapshot
+
+Returns a JSON snapshot of every data table — secrets, secret versions, roles,
+tokens, the name index, and the local `audit_log` — as stored on the node that
+serves the request. Taken under a single read transaction, so it is a
+**consistent, point-in-time** view and does not block writes.
+
+**Secret values stay encrypted.** The snapshot contains only the sealed records
+(`{wrapped_dek, nonce, ciphertext, aad, kms_key_id}`), never plaintext —
+decrypting a restored secret still requires the KMS key. Secret **names**, role
+definitions, token **fingerprints** (SHA-256, not the tokens themselves), and
+audit entries are in cleartext, so treat the artifact as sensitive and encrypt
+it (e.g. `age`/`restic`) before it leaves the host.
+
+Call the **leader** for the most up-to-date committed state. Response body:
+
+```json
+{ "version": 1, "secrets": [], "versions": [], "roles": [], "tokens": [], "tokens_by_name": [], "audit": [] }
+```
+
+(Each list holds `[key, bytes]` pairs of the raw stored rows; `version` is the
+snapshot schema version.)
+
+#### `POST /v1/restore` — import a snapshot
+
+Body is a snapshot produced by `GET /v1/backup`. **Replaces** (not merges) every
+data table on the node with the snapshot's contents. `204 No Content` on success;
+`400` if `version` is not supported.
+
+Restore writes directly to the local node, **bypassing Raft**. Use it to rebuild
+a **fresh** node (or the intended new leader), then wipe the other nodes' data
+dirs so they re-sync from it via the Raft snapshot flow. Restoring into one node
+of a live, healthy cluster creates divergence — don't.
+
+Because restore is a full replace, an older snapshot that predates your current
+admin token will remove it: the token used for the restore call is already
+authenticated so the call itself succeeds, but subsequent calls need a token that
+exists in the restored set.
 
 ### `GET /healthz` / `GET /readyz`
 

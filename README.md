@@ -58,6 +58,11 @@ Status: **in progress**
   up to `VAULT_KMS_MAX_RETRIES`.
 - **Audit log.** Every operation is recorded (actor, client IP, action,
   outcome) in a local `audit_log` table per node.
+- **Backup & restore.** Admin-only `GET /v1/backup` exports a consistent,
+  point-in-time snapshot of every data table (secrets, versions, roles, tokens,
+  audit); secret **values stay encrypted** — only sealed records leave the store,
+  never plaintext. `POST /v1/restore` rebuilds a node from such a snapshot. No
+  external tooling, cron, or background worker — just two API calls.
 - **Defense in depth.** Application-enforced access invariants, version-bound
   AEAD associated data (a ciphertext can't be replayed under another secret name
   or version), and zeroized key material in memory.
