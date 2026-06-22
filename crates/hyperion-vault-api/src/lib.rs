@@ -83,7 +83,6 @@ pub async fn build_state(cfg: &Config) -> anyhow::Result<SharedState> {
         let node = RaftNode::start(redb.clone(), cfg.node_id, cfg.peers.clone())
             .await
             .context("failed to start raft node")?;
-        node.bootstrap().await.context("raft bootstrap failed")?;
 
         let handle = node.raft.clone();
         let raft_listen = raft_listen_addr(cfg)?;
@@ -93,6 +92,8 @@ pub async fn build_state(cfg: &Config) -> anyhow::Result<SharedState> {
                 tracing::error!(error = %err, "raft RPC server stopped");
             }
         });
+
+        node.bootstrap().await.context("raft bootstrap failed")?;
         tracing::info!(peers = cfg.peers.len(), "raft replication enabled");
 
         store = Arc::new(RaftStore::new(node));

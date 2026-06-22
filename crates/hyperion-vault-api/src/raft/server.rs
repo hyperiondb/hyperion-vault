@@ -4,7 +4,7 @@ use anyhow::Context;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
 use tokio::net::TcpListener;
@@ -18,6 +18,7 @@ pub fn router(raft: Raft) -> Router {
         .route("/raft/snapshot", post(snapshot))
         .route("/raft/vote", post(vote))
         .route("/raft/apply", post(apply))
+        .route("/raft/initialized", get(initialized))
         .with_state(raft)
 }
 
@@ -56,4 +57,9 @@ async fn apply(State(raft): State<Raft>, Json(command): Json<Command>) -> Respon
         Ok(response) => (StatusCode::OK, Json(response.data)).into_response(),
         Err(err) => (StatusCode::SERVICE_UNAVAILABLE, format!("{err}")).into_response(),
     }
+}
+
+async fn initialized(State(raft): State<Raft>) -> Response {
+    let value = raft.is_initialized().await.unwrap_or(false);
+    Json(value).into_response()
 }

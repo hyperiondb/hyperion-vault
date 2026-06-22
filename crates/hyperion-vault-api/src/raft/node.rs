@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -62,16 +63,90 @@ impl RaftNode {
     }
 
     pub async fn bootstrap(&self) -> Result<()> {
+        if self
+            .raft
+            .is_initialized()
+            .await
+            .map_err(|e| anyhow!("raft is_initialized check failed: {e}"))?
+        {
+            tracing::info!("raft already has local cluster state; resuming existing membership");
+            return Ok(());
+        }
+
         let lowest = self.peers.keys().next().copied().unwrap_or(self.node_id);
-        if self.node_id == lowest {
-            match self.raft.initialize(self.peers.clone()).await {
-                Ok(_) => tracing::info!("raft cluster initialized"),
-                Err(err) => {
-                    tracing::info!(error = %err, "raft initialize skipped (already initialized)")
-                }
-            }
+        if self.node_id != lowest {
+            tracing::info!(
+                "node has no local state and is not the bootstrap node; waiting to be caught up by the leader"
+            );
+            return Ok(());
+        }
+
+        if self.cluster_already_running().await {
+            tracing::warn!(
+                "existing raft cluster detected on peers; NOT re-initializing — this node lost its \
+                 local state and will be caught up by the current leader"
+            );
+            return Ok(());
+        }
+
+        match self.raft.initialize(self.peers.clone()).await {
+            Ok(_) => tracing::info!("raft cluster initialized (first boot)"),
+            Err(err) => tracing::warn!(error = %err, "raft initialize skipped"),
         }
         Ok(())
+    }
+
+    async fn cluster_already_running(&self) -> bool {
+        let others: Vec<(NodeId, String)> = self
+            .peers
+            .iter()
+            .filter(|(id, _)| **id != self.node_id)
+            .map(|(id, node)| (*id, node.addr.clone()))
+            .collect();
+        if others.is_empty() {
+            return false;
+        }
+
+        for attempt in 1..=10u32 {
+            let mut reached_any = false;
+            for (id, addr) in &others {
+                match self.peer_initialized(addr).await {
+                    Some(true) => {
+                        tracing::info!(peer = *id, %addr, "peer reports an existing cluster");
+                        return true;
+                    }
+                    Some(false) => reached_any = true,
+                    None => {}
+                }
+            }
+            if reached_any {
+                return false;
+            }
+            tracing::info!(
+                attempt,
+                "no peers reachable yet; retrying cluster discovery before initializing"
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+
+        tracing::warn!(
+            "could not reach any peer to confirm cluster state; refusing to auto-initialize to avoid split-brain"
+        );
+        true
+    }
+
+    async fn peer_initialized(&self, addr: &str) -> Option<bool> {
+        let url = format!("http://{addr}/raft/initialized");
+        match self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp.json::<bool>().await.ok(),
+            _ => None,
+        }
     }
 
     async fn write(&self, command: Command) -> StoreResult<()> {

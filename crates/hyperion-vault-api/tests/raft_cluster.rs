@@ -42,6 +42,40 @@ async fn start_leader(addr: &str) -> std::sync::Arc<RaftNode> {
 }
 
 #[tokio::test]
+async fn empty_lowest_node_skips_init_when_a_peer_reports_a_cluster() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake peer");
+    let peer_addr = listener.local_addr().expect("fake peer addr");
+    let app = axum::Router::new().route(
+        "/raft/initialized",
+        axum::routing::get(|| async { axum::Json(true) }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let store = RedbStore::open(temp_db_path(), 1).expect("open redb store");
+    let mut peers = BTreeMap::new();
+    peers.insert(1, "127.0.0.1:17595".to_string());
+    peers.insert(2, peer_addr.to_string());
+    let node = RaftNode::start(store, 1, peers)
+        .await
+        .expect("raft node must construct");
+
+    node.bootstrap().await.expect("bootstrap");
+
+    assert!(
+        !node
+            .raft
+            .is_initialized()
+            .await
+            .expect("is_initialized must not be fatal"),
+        "a node that lost its local state must NOT re-initialize a cluster that already exists"
+    );
+}
+
+#[tokio::test]
 async fn raft_node_construction_creates_required_tables() {
     let store = RedbStore::open(temp_db_path(), 1).expect("open redb store");
     let node = RaftNode::start(store, 1, peer_map("127.0.0.1:17400")).await;
