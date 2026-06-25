@@ -25,6 +25,9 @@ pub struct Config {
     pub rotation_poll_secs: u64,
     pub dek_cache_ttl_secs: u64,
     pub kms_max_retries: u32,
+    pub kms_rewrap_enabled: bool,
+    pub kms_rewrap_poll_secs: u64,
+    pub kms_rewrap_max_per_sec: u32,
     pub auth_max_failures: u32,
     pub auth_lockout_secs: i64,
     pub auth_window_secs: i64,
@@ -90,6 +93,13 @@ impl Config {
             kms_max_retries: env_or("VAULT_KMS_MAX_RETRIES", "5")
                 .parse()
                 .context("VAULT_KMS_MAX_RETRIES must be an integer (0 disables retries)")?,
+            kms_rewrap_enabled: parse_bool(&env_or("VAULT_KMS_REWRAP_ENABLED", "false")),
+            kms_rewrap_poll_secs: env_or("VAULT_KMS_REWRAP_POLL_SECS", "86400")
+                .parse()
+                .context("VAULT_KMS_REWRAP_POLL_SECS must be an integer (seconds)")?,
+            kms_rewrap_max_per_sec: env_or("VAULT_KMS_REWRAP_MAX_PER_SEC", "10")
+                .parse()
+                .context("VAULT_KMS_REWRAP_MAX_PER_SEC must be an integer (0 disables pacing)")?,
             auth_max_failures: env_or("VAULT_AUTH_MAX_FAILURES", "5")
                 .parse()
                 .context("VAULT_AUTH_MAX_FAILURES must be an integer (0 disables lockout)")?,

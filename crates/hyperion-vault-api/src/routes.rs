@@ -5,15 +5,15 @@ use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
 
 use crate::dto::{
-    BatchGetRequest, CreateRoleRequest, CreateSecretRequest, CreateTokenRequest, RoleInfo,
-    SecretMetadata, SecretValue, SetPermissionsRequest, TokenCreated, TokenInfo,
-    UpdateSecretRequest, VerifyRequest, VerifyResponse,
+    BatchGetRequest, CreateRoleRequest, CreateSecretRequest, CreateTokenRequest, RewrapRunResponse,
+    RewrapStatusResponse, RoleInfo, SecretMetadata, SecretValue, SetPermissionsRequest,
+    TokenCreated, TokenInfo, UpdateSecretRequest, VerifyRequest, VerifyResponse,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::guards::{AdminActor, ReaderGuard};
 use crate::state::SharedState;
 use crate::store::BackupData;
-use crate::{authz, manage, service};
+use crate::{authz, manage, rewrap, service};
 
 const RESTORE_BODY_LIMIT: usize = 256 << 20;
 
@@ -39,6 +39,8 @@ pub fn router(state: SharedState) -> Router {
             "/v1/restore",
             post(restore).layer(DefaultBodyLimit::max(RESTORE_BODY_LIMIT)),
         )
+        .route("/v1/admin/kms/rewrap", post(kms_rewrap))
+        .route("/v1/admin/kms/rewrap/status", get(kms_rewrap_status))
         .layer(DefaultBodyLimit::max(1 << 20))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -227,6 +229,24 @@ async fn restore(
     authz::require_admin(&state, &actor).await?;
     manage::restore(&state, &actor.name, data).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn kms_rewrap(
+    State(state): State<SharedState>,
+    actor: AdminActor,
+) -> ApiResult<Json<RewrapRunResponse>> {
+    authz::require_admin(&state, &actor).await?;
+    Ok(Json(rewrap::force(&state).await.map_err(ApiError::Internal)?))
+}
+
+async fn kms_rewrap_status(
+    State(state): State<SharedState>,
+    actor: AdminActor,
+) -> ApiResult<Json<RewrapStatusResponse>> {
+    authz::require_admin(&state, &actor).await?;
+    Ok(Json(
+        rewrap::status(&state).await.map_err(ApiError::Internal)?,
+    ))
 }
 
 async fn healthz() -> &'static str {

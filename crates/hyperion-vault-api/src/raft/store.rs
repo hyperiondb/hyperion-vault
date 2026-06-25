@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{ApplyResult, NodeId, TypeConfig};
 use crate::store::apply::apply_command;
-use crate::store::engine::{RedbStore, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS};
+use crate::store::engine::{
+    RedbStore, KMS_REWRAP, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS,
+};
 
 const LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("raft_log");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_meta");
@@ -317,6 +319,8 @@ struct SnapshotData {
     roles: Vec<(String, Vec<u8>)>,
     tokens: Vec<(Vec<u8>, Vec<u8>)>,
     tokens_by_name: Vec<(String, Vec<u8>)>,
+    #[serde(default)]
+    kms_rewrap: Vec<(String, Vec<u8>)>,
     last_applied: Option<LogId<NodeId>>,
     membership: StoredMembership<NodeId, openraft::BasicNode>,
 }
@@ -361,6 +365,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
             roles: dump_str_table(&rtx, ROLES)?,
             tokens,
             tokens_by_name: dump_str_table(&rtx, TOKENS_BY_NAME)?,
+            kms_rewrap: dump_str_table(&rtx, KMS_REWRAP)?,
             last_applied,
             membership: membership.clone(),
         };
@@ -483,6 +488,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
             restore_str_table(&wtx, VERSIONS, &data.versions)?;
             restore_str_table(&wtx, ROLES, &data.roles)?;
             restore_str_table(&wtx, TOKENS_BY_NAME, &data.tokens_by_name)?;
+            restore_str_table(&wtx, KMS_REWRAP, &data.kms_rewrap)?;
             let mut table = wtx.open_table(TOKENS).map_err(write_err)?;
             clear_bytes_table(&mut table)?;
             for (key, value) in &data.tokens {

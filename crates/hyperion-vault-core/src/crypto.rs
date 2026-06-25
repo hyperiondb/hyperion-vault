@@ -150,16 +150,26 @@ impl LocalKeyWrapper {
         master.copy_from_slice(&raw);
         Ok(Self::new(master, key_id))
     }
+
+    fn wrap_dek(&self, dek: &[u8; DEK_LEN]) -> Result<Vec<u8>> {
+        let nonce = generate_nonce();
+        let ct = seal(&self.master, &nonce, WRAP_AAD, dek).map_err(|_| Error::KeyWrap)?;
+        let mut wrapped = Vec::with_capacity(NONCE_LEN + ct.len());
+        wrapped.extend_from_slice(&nonce);
+        wrapped.extend_from_slice(&ct);
+        Ok(wrapped)
+    }
+
+    pub fn rewrap(&self, wrapped: &[u8], key_id: &str) -> Result<(Vec<u8>, String)> {
+        let dek = self.unwrap_data_key(wrapped, key_id)?;
+        Ok((self.wrap_dek(&dek)?, self.key_id.clone()))
+    }
 }
 
 impl KeyWrapper for LocalKeyWrapper {
     fn generate_data_key(&self) -> Result<DataKey> {
         let dek = generate_dek();
-        let nonce = generate_nonce();
-        let ct = seal(&self.master, &nonce, WRAP_AAD, &dek[..]).map_err(|_| Error::KeyWrap)?;
-        let mut wrapped = Vec::with_capacity(NONCE_LEN + ct.len());
-        wrapped.extend_from_slice(&nonce);
-        wrapped.extend_from_slice(&ct);
+        let wrapped = self.wrap_dek(&dek)?;
         Ok(DataKey {
             plaintext: dek,
             wrapped,
@@ -175,5 +185,43 @@ impl KeyWrapper for LocalKeyWrapper {
         let nonce: &[u8; NONCE_LEN] = nonce.try_into().map_err(|_| Error::KeyUnwrap)?;
         let pt = open(&self.master, nonce, WRAP_AAD, ct).map_err(|_| Error::KeyUnwrap)?;
         dek_from_slice(&pt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrap_preserves_dek_and_payload() {
+        let wrapper = LocalKeyWrapper::new([7u8; DEK_LEN], "master-1");
+        let aad = b"db/password:1";
+        let plaintext = b"super-secret-value";
+
+        let env = seal_envelope(&wrapper, aad, plaintext).expect("seal");
+        assert_eq!(
+            open_envelope(&wrapper, &env, aad).expect("open").as_slice(),
+            plaintext
+        );
+
+        // Re-wrap the DEK in place (same underlying secret, new wrapping).
+        let (rewrapped, key_id) = wrapper.rewrap(&env.wrapped_dek, &env.key_id).expect("rewrap");
+        assert_eq!(key_id, "master-1");
+        assert_ne!(
+            rewrapped, env.wrapped_dek,
+            "a fresh wrap nonce makes the wrapped blob differ"
+        );
+
+        // The same ciphertext, now with the re-wrapped DEK, still opens to the same value.
+        let rewrapped_env = Envelope {
+            wrapped_dek: rewrapped,
+            ..env.clone()
+        };
+        assert_eq!(
+            open_envelope(&wrapper, &rewrapped_env, aad)
+                .expect("open rewrapped")
+                .as_slice(),
+            plaintext
+        );
     }
 }

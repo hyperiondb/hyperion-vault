@@ -18,6 +18,15 @@ pub trait KmsProvider: Send + Sync {
         key_id: &str,
         context: &[(&str, &str)],
     ) -> Result<Dek>;
+
+    async fn reencrypt_data_key(
+        &self,
+        wrapped: &[u8],
+        source_key_id: &str,
+        context: &[(&str, &str)],
+    ) -> Result<(Vec<u8>, String)>;
+
+    async fn latest_rotation_at(&self) -> Result<Option<i64>>;
 }
 
 pub async fn build(cfg: &Config) -> Result<Arc<dyn KmsProvider>> {
@@ -83,6 +92,45 @@ impl KmsProvider for RetryingKms {
                 Ok(value) => return Ok(value),
                 Err(err) if attempt < self.max_retries => {
                     tracing::warn!(attempt, max = self.max_retries, error = %err, "kms decrypt failed; retrying");
+                    tokio::time::sleep(self.backoff(attempt)).await;
+                    attempt += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn reencrypt_data_key(
+        &self,
+        wrapped: &[u8],
+        source_key_id: &str,
+        context: &[(&str, &str)],
+    ) -> Result<(Vec<u8>, String)> {
+        let mut attempt = 0;
+        loop {
+            match self
+                .inner
+                .reencrypt_data_key(wrapped, source_key_id, context)
+                .await
+            {
+                Ok(value) => return Ok(value),
+                Err(err) if attempt < self.max_retries => {
+                    tracing::warn!(attempt, max = self.max_retries, error = %err, "kms re_encrypt failed; retrying");
+                    tokio::time::sleep(self.backoff(attempt)).await;
+                    attempt += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn latest_rotation_at(&self) -> Result<Option<i64>> {
+        let mut attempt = 0;
+        loop {
+            match self.inner.latest_rotation_at().await {
+                Ok(value) => return Ok(value),
+                Err(err) if attempt < self.max_retries => {
+                    tracing::warn!(attempt, max = self.max_retries, error = %err, "kms list_key_rotations failed; retrying");
                     tokio::time::sleep(self.backoff(attempt)).await;
                     attempt += 1;
                 }
@@ -163,6 +211,69 @@ impl KmsProvider for AwsKms {
         let plaintext = out.plaintext().context("kms returned no plaintext")?;
         Ok(dek_from_slice(plaintext.as_ref())?)
     }
+
+    async fn reencrypt_data_key(
+        &self,
+        wrapped: &[u8],
+        source_key_id: &str,
+        context: &[(&str, &str)],
+    ) -> Result<(Vec<u8>, String)> {
+        let mut request = self
+            .client
+            .re_encrypt()
+            .ciphertext_blob(Blob::new(wrapped.to_vec()))
+            .source_key_id(source_key_id)
+            .destination_key_id(&self.key_id);
+        for &(key, value) in context {
+            request = request
+                .source_encryption_context(key, value)
+                .destination_encryption_context(key, value);
+        }
+        let out = request
+            .send()
+            .await
+            .map_err(|err| anyhow::anyhow!("kms re_encrypt failed: {err:?}"))?;
+
+        let blob = out
+            .ciphertext_blob()
+            .context("kms re_encrypt returned no ciphertext blob")?
+            .as_ref()
+            .to_vec();
+        let key_id = out.key_id().unwrap_or(&self.key_id).to_string();
+        Ok((blob, key_id))
+    }
+
+    async fn latest_rotation_at(&self) -> Result<Option<i64>> {
+        let mut marker: Option<String> = None;
+        let mut latest: Option<i64> = None;
+        loop {
+            let mut request = self.client.list_key_rotations().key_id(&self.key_id);
+            if let Some(value) = &marker {
+                request = request.marker(value);
+            }
+            let out = request
+                .send()
+                .await
+                .map_err(|err| anyhow::anyhow!("kms list_key_rotations failed: {err:?}"))?;
+
+            for entry in out.rotations() {
+                if let Some(date) = entry.rotation_date() {
+                    let secs = date.secs();
+                    latest = Some(latest.map_or(secs, |current| current.max(secs)));
+                }
+            }
+
+            if out.truncated() {
+                marker = out.next_marker().map(|value| value.to_string());
+                if marker.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(latest)
+    }
 }
 
 pub struct LocalKms {
@@ -182,5 +293,18 @@ impl KmsProvider for LocalKms {
         _context: &[(&str, &str)],
     ) -> Result<Dek> {
         Ok(self.inner.unwrap_data_key(wrapped, key_id)?)
+    }
+
+    async fn reencrypt_data_key(
+        &self,
+        wrapped: &[u8],
+        source_key_id: &str,
+        _context: &[(&str, &str)],
+    ) -> Result<(Vec<u8>, String)> {
+        Ok(self.inner.rewrap(wrapped, source_key_id)?)
+    }
+
+    async fn latest_rotation_at(&self) -> Result<Option<i64>> {
+        Ok(None)
     }
 }

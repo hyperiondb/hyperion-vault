@@ -11,6 +11,8 @@ pub mod kms;
 pub mod lockout;
 pub mod manage;
 pub mod raft;
+pub mod rewrap;
+pub mod rewrap_worker;
 pub mod rotation_worker;
 pub mod routes;
 pub mod service;
@@ -139,6 +141,9 @@ pub async fn build_state(cfg: &Config) -> anyhow::Result<SharedState> {
         auth_max_failures: cfg.auth_max_failures,
         auth_lockout_secs: cfg.auth_lockout_secs,
         auth_window_secs: cfg.auth_window_secs,
+        kms_rewrap_enabled: cfg.kms_rewrap_enabled,
+        kms_rewrap_max_per_sec: cfg.kms_rewrap_max_per_sec,
+        rewrap_busy: std::sync::atomic::AtomicBool::new(false),
     }))
 }
 
@@ -169,6 +174,16 @@ pub async fn serve() -> anyhow::Result<()> {
     let worker_state = state.clone();
     let poll = cfg.rotation_poll_secs;
     tokio::spawn(async move { rotation_worker::run(worker_state, poll).await });
+
+    if cfg.kms_rewrap_enabled {
+        let rewrap_state = state.clone();
+        let rewrap_poll = cfg.kms_rewrap_poll_secs;
+        tokio::spawn(async move { rewrap_worker::run(rewrap_state, rewrap_poll).await });
+    } else {
+        tracing::info!(
+            "kms rewrap worker disabled (VAULT_KMS_REWRAP_ENABLED=false); manual /v1/admin/kms/rewrap still available"
+        );
+    }
 
     let listen = cfg.api_listen;
     let app = routes::router(state);

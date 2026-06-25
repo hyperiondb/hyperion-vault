@@ -26,6 +26,8 @@ pub struct VersionRecord {
     pub aad: Vec<u8>,
     pub created_at: i64,
     pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub wrapped_rotation_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +65,13 @@ pub struct AuditEntry {
     pub secret_name: Option<String>,
     pub outcome: String,
     pub node_id: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KmsRewrapState {
+    pub last_completed_rotation_at: i64,
+    pub last_swept_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +132,16 @@ pub enum Command {
     },
     ExpireGraceVersions {
         now: i64,
+    },
+    RewrapVersion {
+        name: String,
+        version: i32,
+        kms_key_id: String,
+        wrapped_dek: Vec<u8>,
+        wrapped_rotation_at: i64,
+    },
+    SetKmsRewrapState {
+        state: KmsRewrapState,
     },
     AppendAudit {
         entry: AuditEntry,

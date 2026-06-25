@@ -20,7 +20,7 @@ Comparable to [supabase/vault](https://github.com/supabase/vault) and
 rotation) — this project packages that model as a small, dependency-free,
 self-replicating cluster.
 
-Status: **in progress**
+Status: **in production**
 
 ---
 
@@ -56,6 +56,12 @@ Status: **in progress**
 - **KMS-outage resilience.** Unwrapped data keys are cached in memory for
   `VAULT_DEK_CACHE_TTL_SECS`, and KMS calls are retried with exponential backoff
   up to `VAULT_KMS_MAX_RETRIES`.
+- **KMS key rotation.** Automatic CMK rotation is transparent (each version
+  records the key that wrapped it). When `VAULT_KMS_REWRAP_ENABLED` is on, a
+  leader-gated worker also detects rotations (`kms:ListKeyRotations`) and
+  re-wraps every live version's data key onto the new key material via
+  `kms:ReEncrypt` — secret bytes are never re-encrypted and the DEK never leaves
+  KMS. Force/inspect with `POST`/`GET /v1/admin/kms/rewrap`.
 - **Audit log.** Every operation is recorded (actor, client IP, action,
   outcome) in a local `audit_log` table per node.
 - **Backup & restore.** Admin-only `GET /v1/backup` exports a consistent,
@@ -161,6 +167,9 @@ curl -sS -X POST localhost:8200/v1/secrets \
 | `VAULT_ROTATION_POLL_SECS` | `15` | How often the leader scans for due rotations. |
 | `VAULT_DEK_CACHE_TTL_SECS` | `300` | TTL of the in-memory decrypted-DEK cache. `0` disables. |
 | `VAULT_KMS_MAX_RETRIES` | `5` | Retry KMS calls up to N times with exponential backoff. `0` disables. |
+| `VAULT_KMS_REWRAP_ENABLED` | `false` | Re-wrap data keys onto new CMK material after a KMS key rotation. Enable only after every node runs a build that understands it. |
+| `VAULT_KMS_REWRAP_POLL_SECS` | `86400` | How often the leader polls `kms:ListKeyRotations` for a new rotation. |
+| `VAULT_KMS_REWRAP_MAX_PER_SEC` | `10` | Re-wrap pacing (KMS `ReEncrypt` + Raft writes per second). `0` disables pacing. |
 | `VAULT_AUTH_MAX_FAILURES` | `5` | Failed auth/authz attempts (per client IP) before lockout. `0` disables. |
 | `VAULT_AUTH_LOCKOUT_SECS` | `900` | How long a locked-out IP stays locked. |
 | `VAULT_AUTH_WINDOW_SECS` | `300` | Window over which failures accumulate. |
@@ -168,7 +177,8 @@ curl -sS -X POST localhost:8200/v1/secrets \
 For AWS mode, AWS credentials and region come from the standard AWS SDK
 environment (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, or an
 instance role) — not from `VAULT_*` variables. The key's IAM policy needs only
-`kms:GenerateDataKey` and `kms:Decrypt`.
+`kms:GenerateDataKey` and `kms:Decrypt` (add `kms:ListKeyRotations` and
+`kms:ReEncryptFrom`/`kms:ReEncryptTo` when `VAULT_KMS_REWRAP_ENABLED=true`).
 
 ---
 

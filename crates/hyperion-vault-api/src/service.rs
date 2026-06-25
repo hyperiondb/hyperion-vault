@@ -559,6 +559,12 @@ async fn seal_version(
     let data_key = state.kms.generate_data_key(&context).await?;
     let nonce = generate_nonce();
     let ciphertext = seal(&data_key.plaintext, &nonce, &aad, plaintext)?;
+    let generation = state
+        .store
+        .kms_rewrap_state()
+        .await?
+        .map(|s| s.last_completed_rotation_at)
+        .unwrap_or(0);
     Ok(VersionRecord {
         version,
         kms_key_id: data_key.key_id,
@@ -568,6 +574,7 @@ async fn seal_version(
         aad,
         created_at: now,
         expires_at: None,
+        wrapped_rotation_at: Some(generation),
     })
 }
 

@@ -2,7 +2,8 @@ use async_trait::async_trait;
 
 use super::backup::BackupData;
 use super::model::{
-    Command, LockoutRecord, RoleRecord, SecretRecord, StoreResult, TokenRecord, VersionRecord,
+    Command, KmsRewrapState, LockoutRecord, RoleRecord, SecretRecord, StoreResult, TokenRecord,
+    VersionRecord,
 };
 
 #[async_trait]
@@ -21,6 +22,7 @@ pub trait VaultReader: Send + Sync {
     async fn token_by_fingerprint(&self, fingerprint: Vec<u8>) -> StoreResult<Option<TokenRecord>>;
     async fn list_tokens(&self) -> StoreResult<Vec<TokenRecord>>;
     async fn lockout(&self, ip: String) -> StoreResult<Option<LockoutRecord>>;
+    async fn kms_rewrap_state(&self) -> StoreResult<Option<KmsRewrapState>>;
     async fn dump(&self) -> StoreResult<BackupData>;
 }
 

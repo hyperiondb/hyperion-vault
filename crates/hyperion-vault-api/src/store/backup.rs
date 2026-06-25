@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use super::engine::{AUDIT, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS};
+use super::engine::{AUDIT, KMS_REWRAP, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS};
 
 pub const BACKUP_VERSION: u32 = 1;
 
@@ -15,6 +15,8 @@ pub struct BackupData {
     pub tokens: Vec<(Vec<u8>, Vec<u8>)>,
     pub tokens_by_name: Vec<(String, Vec<u8>)>,
     pub audit: Vec<(u64, Vec<u8>)>,
+    #[serde(default)]
+    pub kms_rewrap: Vec<(String, Vec<u8>)>,
 }
 
 pub fn dump_database(db: &Database) -> Result<BackupData> {
@@ -27,6 +29,7 @@ pub fn dump_database(db: &Database) -> Result<BackupData> {
         tokens: dump_bytes(&rtx, TOKENS)?,
         tokens_by_name: dump_str(&rtx, TOKENS_BY_NAME)?,
         audit: dump_u64(&rtx, AUDIT)?,
+        kms_rewrap: dump_str(&rtx, KMS_REWRAP)?,
     };
     drop(rtx);
     Ok(data)
@@ -47,6 +50,7 @@ pub fn restore_database(db: &Database, data: &BackupData) -> Result<()> {
         restore_str(&wtx, TOKENS_BY_NAME, &data.tokens_by_name)?;
         restore_bytes(&wtx, TOKENS, &data.tokens)?;
         restore_u64(&wtx, AUDIT, &data.audit)?;
+        restore_str(&wtx, KMS_REWRAP, &data.kms_rewrap)?;
     }
     wtx.commit().context("commit restore")?;
     Ok(())

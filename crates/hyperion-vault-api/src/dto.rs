@@ -35,6 +35,24 @@ pub struct UpdateSecretRequest {
     pub grace_period_secs: Option<i64>,
 }
 
+#[derive(Serialize)]
+pub struct RewrapStatusResponse {
+    pub enabled: bool,
+    pub busy: bool,
+    pub last_completed_rotation_at: Option<String>,
+    pub latest_rotation_at: Option<String>,
+    pub total_versions: usize,
+    pub pending_versions: usize,
+}
+
+#[derive(Serialize)]
+pub struct RewrapRunResponse {
+    pub scanned: usize,
+    pub rewrapped: usize,
+    pub failed: usize,
+    pub target_rotation_at: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct VerifyRequest {
     pub value: String,

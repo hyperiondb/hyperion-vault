@@ -44,6 +44,7 @@ fn sample_secret(name: &str, ciphertext: Vec<u8>) -> (SecretRecord, VersionRecor
         aad: format!("{name}:1").into_bytes(),
         created_at: 0,
         expires_at: None,
+        wrapped_rotation_at: None,
     };
     (secret, version)
 }

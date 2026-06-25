@@ -8,8 +8,8 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use super::apply::apply_command;
 use super::codec::{decode, encode};
 use super::model::{
-    Command, LockoutRecord, RoleRecord, SecretRecord, StoreError, StoreResult, TokenRecord,
-    VersionRecord,
+    Command, KmsRewrapState, LockoutRecord, RoleRecord, SecretRecord, StoreError, StoreResult,
+    TokenRecord, VersionRecord,
 };
 use super::ports::{VaultReader, VaultWriter};
 
@@ -21,6 +21,9 @@ pub const TOKENS_BY_NAME: TableDefinition<&str, &[u8]> =
     TableDefinition::new("admin_tokens_by_name");
 pub const LOCKOUTS: TableDefinition<&str, &[u8]> = TableDefinition::new("auth_lockouts");
 pub const AUDIT: TableDefinition<u64, &[u8]> = TableDefinition::new("audit_log");
+pub const KMS_REWRAP: TableDefinition<&str, &[u8]> = TableDefinition::new("kms_rewrap");
+
+pub const KMS_REWRAP_STATE_KEY: &str = "state";
 
 pub fn version_key(name: &str, version: i32) -> String {
     format!("{name}\u{0}{version:010}")
@@ -68,6 +71,7 @@ impl RedbStore {
         wtx.open_table(TOKENS_BY_NAME)?;
         wtx.open_table(LOCKOUTS)?;
         wtx.open_table(AUDIT)?;
+        wtx.open_table(KMS_REWRAP)?;
         wtx.commit()?;
         Ok(())
     }
@@ -283,6 +287,19 @@ impl VaultReader for RedbStore {
             let locks = rtx.open_table(LOCKOUTS)?;
             match locks.get(ip.as_str())? {
                 Some(value) => Ok(Some(decode::<LockoutRecord>(value.value())?)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    async fn kms_rewrap_state(&self) -> StoreResult<Option<KmsRewrapState>> {
+        let db = self.db.clone();
+        blocking(move || {
+            let rtx = db.begin_read()?;
+            let table = rtx.open_table(KMS_REWRAP)?;
+            match table.get(KMS_REWRAP_STATE_KEY)? {
+                Some(value) => Ok(Some(decode::<KmsRewrapState>(value.value())?)),
                 None => Ok(None),
             }
         })

@@ -3,8 +3,8 @@ use redb::{ReadableTable, WriteTransaction};
 
 use super::codec::{decode, encode};
 use super::engine::{
-    version_key, version_lower, version_upper, AUDIT, LOCKOUTS, ROLES, SECRETS, TOKENS,
-    TOKENS_BY_NAME, VERSIONS,
+    version_key, version_lower, version_upper, AUDIT, KMS_REWRAP, KMS_REWRAP_STATE_KEY, LOCKOUTS,
+    ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS,
 };
 use super::model::{
     Command, LockoutRecord, NextRotation, SecretRecord, StoreError, StoreResult, TokenRecord,
@@ -283,6 +283,42 @@ pub fn apply_command(wtx: &WriteTransaction, node_id: u64, command: &Command) ->
             Ok(())
         }
 
+        Command::RewrapVersion {
+            name,
+            version,
+            kms_key_id,
+            wrapped_dek,
+            wrapped_rotation_at,
+        } => {
+            let mut versions = wtx.open_table(VERSIONS).map_err(err)?;
+            let key = version_key(name, *version);
+            let mut record: VersionRecord = match versions.get(key.as_str()).map_err(err)? {
+                Some(value) => decode(value.value())?,
+                None => return Ok(()),
+            };
+            if record
+                .wrapped_rotation_at
+                .is_some_and(|current| current >= *wrapped_rotation_at)
+            {
+                return Ok(());
+            }
+            record.kms_key_id = kms_key_id.clone();
+            record.wrapped_dek = wrapped_dek.clone();
+            record.wrapped_rotation_at = Some(*wrapped_rotation_at);
+            versions
+                .insert(key.as_str(), encode(&record)?.as_slice())
+                .map_err(err)?;
+            Ok(())
+        }
+
+        Command::SetKmsRewrapState { state } => {
+            let mut table = wtx.open_table(KMS_REWRAP).map_err(err)?;
+            table
+                .insert(KMS_REWRAP_STATE_KEY, encode(state)?.as_slice())
+                .map_err(err)?;
+            Ok(())
+        }
+
         Command::AppendAudit { entry } => {
             let mut audit = wtx.open_table(AUDIT).map_err(err)?;
             let next: u64 = match audit.last().map_err(err)? {
@@ -350,4 +386,165 @@ fn apply_meta(
         secret.next_rotation_at = *value;
     }
     secret.updated_at = updated_at;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::engine::version_key;
+    use crate::store::model::KmsRewrapState;
+    use hyperion_vault_core::{SecretFormat, SecretKind};
+    use redb::{Database, ReadableDatabase};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn tmp_db() -> Database {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("hv-apply-test-{}-{}.redb", std::process::id(), n));
+        let _ = std::fs::remove_file(&path);
+        Database::create(path).expect("create db")
+    }
+
+    fn apply(db: &Database, command: Command) -> StoreResult<()> {
+        let wtx = db.begin_write().expect("begin write");
+        let result = apply_command(&wtx, 1, &command);
+        wtx.commit().expect("commit");
+        result
+    }
+
+    fn read_version(db: &Database, name: &str, version: i32) -> VersionRecord {
+        let rtx = db.begin_read().expect("begin read");
+        let table = rtx.open_table(VERSIONS).expect("open versions");
+        let key = version_key(name, version);
+        let value = table.get(key.as_str()).expect("get").expect("version present");
+        decode(value.value()).expect("decode version")
+    }
+
+    fn sample() -> (SecretRecord, VersionRecord) {
+        let secret = SecretRecord {
+            name: "db/password".to_string(),
+            kind: SecretKind::Manual,
+            format: SecretFormat::Opaque,
+            description: None,
+            rotation_interval_secs: None,
+            grace_secs: 0,
+            current_version: 1,
+            next_rotation_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let version = VersionRecord {
+            version: 1,
+            kms_key_id: "old-key".to_string(),
+            wrapped_dek: vec![1, 2, 3],
+            nonce: vec![4; 24],
+            ciphertext: vec![9, 9, 9],
+            aad: b"db/password:1".to_vec(),
+            created_at: 0,
+            expires_at: None,
+            wrapped_rotation_at: None,
+        };
+        (secret, version)
+    }
+
+    #[test]
+    fn rewrap_version_swaps_wrapping_and_preserves_payload() {
+        let db = tmp_db();
+        let (secret, version) = sample();
+        apply(&db, Command::CreateSecret { secret, version }).expect("create");
+
+        apply(
+            &db,
+            Command::RewrapVersion {
+                name: "db/password".to_string(),
+                version: 1,
+                kms_key_id: "new-key".to_string(),
+                wrapped_dek: vec![7, 8, 9, 10],
+                wrapped_rotation_at: 100,
+            },
+        )
+        .expect("rewrap");
+
+        let got = read_version(&db, "db/password", 1);
+        assert_eq!(got.kms_key_id, "new-key");
+        assert_eq!(got.wrapped_dek, vec![7, 8, 9, 10]);
+        assert_eq!(got.wrapped_rotation_at, Some(100));
+        assert_eq!(got.ciphertext, vec![9, 9, 9], "ciphertext must be untouched");
+        assert_eq!(got.nonce, vec![4; 24], "nonce must be untouched");
+        assert_eq!(got.aad, b"db/password:1".to_vec(), "aad must be untouched");
+    }
+
+    #[test]
+    fn rewrap_version_is_idempotent_and_never_errors() {
+        let db = tmp_db();
+        let (secret, version) = sample();
+        apply(&db, Command::CreateSecret { secret, version }).expect("create");
+
+        apply(
+            &db,
+            Command::RewrapVersion {
+                name: "db/password".to_string(),
+                version: 1,
+                kms_key_id: "gen100".to_string(),
+                wrapped_dek: vec![1],
+                wrapped_rotation_at: 100,
+            },
+        )
+        .expect("first rewrap");
+
+        apply(
+            &db,
+            Command::RewrapVersion {
+                name: "db/password".to_string(),
+                version: 1,
+                kms_key_id: "gen100-replay".to_string(),
+                wrapped_dek: vec![2],
+                wrapped_rotation_at: 100,
+            },
+        )
+        .expect("replay rewrap");
+
+        let got = read_version(&db, "db/password", 1);
+        assert_eq!(got.kms_key_id, "gen100", "replay must not overwrite");
+        assert_eq!(got.wrapped_dek, vec![1]);
+
+        apply(
+            &db,
+            Command::RewrapVersion {
+                name: "db/password".to_string(),
+                version: 99,
+                kms_key_id: "x".to_string(),
+                wrapped_dek: vec![0],
+                wrapped_rotation_at: 200,
+            },
+        )
+        .expect("missing version must not error");
+    }
+
+    #[test]
+    fn set_kms_rewrap_state_roundtrips() {
+        let db = tmp_db();
+        apply(
+            &db,
+            Command::SetKmsRewrapState {
+                state: KmsRewrapState {
+                    last_completed_rotation_at: 1234,
+                    last_swept_at: 5,
+                    updated_at: 6,
+                },
+            },
+        )
+        .expect("set state");
+
+        let rtx = db.begin_read().expect("begin read");
+        let table = rtx.open_table(KMS_REWRAP).expect("open kms_rewrap");
+        let value = table
+            .get(KMS_REWRAP_STATE_KEY)
+            .expect("get")
+            .expect("state present");
+        let state: KmsRewrapState = decode(value.value()).expect("decode state");
+        assert_eq!(state.last_completed_rotation_at, 1234);
+    }
 }

@@ -142,6 +142,7 @@ async fn secret_version_round_trips_through_raft() {
         aad: b"db/password:1".to_vec(),
         created_at: 0,
         expires_at: None,
+        wrapped_rotation_at: None,
     };
 
     store
@@ -181,6 +182,7 @@ async fn secret_version_round_trips_through_raft() {
                 aad: vec![],
                 created_at: 0,
                 expires_at: None,
+                wrapped_rotation_at: None,
             },
         })
         .await;
