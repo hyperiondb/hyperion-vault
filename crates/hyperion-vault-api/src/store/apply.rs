@@ -418,7 +418,10 @@ mod tests {
         let rtx = db.begin_read().expect("begin read");
         let table = rtx.open_table(VERSIONS).expect("open versions");
         let key = version_key(name, version);
-        let value = table.get(key.as_str()).expect("get").expect("version present");
+        let value = table
+            .get(key.as_str())
+            .expect("get")
+            .expect("version present");
         decode(value.value()).expect("decode version")
     }
 
@@ -471,7 +474,11 @@ mod tests {
         assert_eq!(got.kms_key_id, "new-key");
         assert_eq!(got.wrapped_dek, vec![7, 8, 9, 10]);
         assert_eq!(got.wrapped_rotation_at, Some(100));
-        assert_eq!(got.ciphertext, vec![9, 9, 9], "ciphertext must be untouched");
+        assert_eq!(
+            got.ciphertext,
+            vec![9, 9, 9],
+            "ciphertext must be untouched"
+        );
         assert_eq!(got.nonce, vec![4; 24], "nonce must be untouched");
         assert_eq!(got.aad, b"db/password:1".to_vec(), "aad must be untouched");
     }

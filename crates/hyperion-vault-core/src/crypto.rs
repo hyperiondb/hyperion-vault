@@ -204,8 +204,9 @@ mod tests {
             plaintext
         );
 
-        // Re-wrap the DEK in place (same underlying secret, new wrapping).
-        let (rewrapped, key_id) = wrapper.rewrap(&env.wrapped_dek, &env.key_id).expect("rewrap");
+        let (rewrapped, key_id) = wrapper
+            .rewrap(&env.wrapped_dek, &env.key_id)
+            .expect("rewrap");
         assert_eq!(key_id, "master-1");
         assert_ne!(
             rewrapped, env.wrapped_dek,

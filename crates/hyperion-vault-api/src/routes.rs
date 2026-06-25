@@ -236,7 +236,9 @@ async fn kms_rewrap(
     actor: AdminActor,
 ) -> ApiResult<Json<RewrapRunResponse>> {
     authz::require_admin(&state, &actor).await?;
-    Ok(Json(rewrap::force(&state).await.map_err(ApiError::Internal)?))
+    Ok(Json(
+        rewrap::force(&state).await.map_err(ApiError::Internal)?,
+    ))
 }
 
 async fn kms_rewrap_status(

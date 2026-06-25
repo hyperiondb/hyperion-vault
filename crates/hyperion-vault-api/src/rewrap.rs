@@ -16,7 +16,9 @@ pub struct RewrapSummary {
 }
 
 fn needs_rewrap(version: &VersionRecord, target: i64) -> bool {
-    version.wrapped_rotation_at.is_none_or(|current| current < target)
+    version
+        .wrapped_rotation_at
+        .is_none_or(|current| current < target)
 }
 
 struct BusyGuard<'a>(&'a AtomicBool);
