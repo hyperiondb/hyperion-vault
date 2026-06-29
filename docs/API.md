@@ -125,6 +125,89 @@ that rotates; `username` is kept across rotations:
 { "name": "db/app", "kind": "manual", "format": "userpass", "version": 1, "username": "app", "password": "s3cr3t", "created_at": "..." }
 ```
 
+#### Rotation targets — applying a rotated password to Postgres (`target`)
+
+An optional `target` on a `userpass` secret makes the vault **apply the new
+password to an external system on every rotation**, so the rotated credential is
+not just stored but actually takes effect. The only target type today is
+`pg_replica`: on rotation the leader connects to the cluster's **writable
+primary** (it tries each `hosts` entry; `ALTER ROLE` only succeeds on the
+primary) and runs `ALTER ROLE "<role>" PASSWORD '<new>'`, **then** commits the
+new version. If the `ALTER ROLE` fails the rotation is aborted and retried, so
+the vault and Postgres never silently diverge. The superseded version stays
+valid for `grace_period_secs` so readers can pick up the new password.
+
+`target` fields:
+
+| field | meaning |
+| --- | --- |
+| `type` | `"pg_replica"` (required) |
+| `hosts` | `["host:port", …]` of the Postgres nodes; the primary is auto-detected |
+| `database` | database to connect to (default `postgres`) |
+| `role` | role whose password to set (default: the secret's `username`) |
+| `login_secret` | a vault `userpass` secret to authenticate the `ALTER ROLE` connection; omit to authenticate as the rotating secret itself |
+
+The **app/superuser role** authenticates as itself (omit `login_secret`):
+
+```json
+{
+  "name": "pg/app",
+  "kind": "automatic",
+  "username": "app",
+  "password": "<current password>",
+  "rotation_interval_secs": 2592000,
+  "grace_period_secs": 86400,
+  "target": {
+    "type": "pg_replica",
+    "hosts": ["10.98.0.3:5432", "10.98.0.2:5432", "10.98.0.4:5432"],
+    "database": "postgres"
+  }
+}
+```
+
+The **replicator role** is altered by authenticating as the superuser
+(`login_secret`); each node's `pg_replica` rewrites its local passfile:
+
+```json
+{
+  "name": "pg/replicator",
+  "kind": "automatic",
+  "username": "replicator",
+  "password": "<current REPL_PASS>",
+  "rotation_interval_secs": 2592000,
+  "grace_period_secs": 86400,
+  "target": {
+    "type": "pg_replica",
+    "hosts": ["10.98.0.3:5432", "10.98.0.2:5432", "10.98.0.4:5432"],
+    "database": "postgres",
+    "role": "replicator",
+    "login_secret": "pg/app"
+  }
+}
+```
+
+> Seed `password` with the role's **current** password so the vault and Postgres
+> agree from the start; the first rotation then generates fresh material. Targets
+> apply on **rotation** (scheduled or `POST /rotate`), not on a manual `PUT`.
+
+#### CiqadaMQ secrets (no target)
+
+CiqadaMQ's secrets are plain rotating `opaque` secrets — no target; ciqadamq and
+its clients read them and refresh on their own (the broker accepts the current
+and previous token across the grace window, and the pepper change self-heals via
+the argon2 fallback):
+
+```json
+{ "name": "ciqada/api-token", "kind": "automatic", "rotation_interval_secs": 2592000, "grace_period_secs": 86400 }
+```
+
+```json
+{ "name": "ciqada/pepper", "kind": "automatic", "value": "<current pepper>", "rotation_interval_secs": 2592000, "grace_period_secs": 86400 }
+```
+
+All four are also created in one shot by `scripts/vaultProvision.mts` in the
+server-backend repo (seeds from the current environment).
+
 ### `GET /v1/secrets/{name}` — read current value *(reader, IP-allowlisted)*
 
 Opaque:

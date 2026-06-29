@@ -29,6 +29,7 @@ base64.workspace = true
 zeroize.workspace = true
 axum = "=0.8.9"
 async-trait = "=0.1.89"
+tokio-postgres = "0.7"
 tower-http = { version = "=0.6.11", features = ["trace", "limit"] }
 aws-config = "=1.8.18"
 aws-sdk-kms = { version = "=1.111.0", default-features = false, features = ["default-https-client", "rt-tokio"] }

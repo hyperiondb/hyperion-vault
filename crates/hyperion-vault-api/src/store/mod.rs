@@ -8,7 +8,7 @@ pub mod ports;
 pub use backup::BackupData;
 pub use engine::RedbStore;
 pub use model::{
-    AuditEntry, Command, KmsRewrapState, LockoutRecord, NextRotation, RoleRecord, SecretRecord,
-    StoreError, StoreResult, TokenRecord, VersionRecord,
+    AuditEntry, Command, KmsRewrapState, LockoutRecord, NextRotation, PgRoleTarget, RoleRecord,
+    RotationTarget, SecretRecord, StoreError, StoreResult, TokenRecord, VersionRecord,
 };
 pub use ports::{VaultReader, VaultStore, VaultWriter};

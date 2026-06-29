@@ -10,6 +10,7 @@ pub mod guards;
 pub mod kms;
 pub mod lockout;
 pub mod manage;
+pub mod pg_apply;
 pub mod raft;
 pub mod rewrap;
 pub mod rewrap_worker;

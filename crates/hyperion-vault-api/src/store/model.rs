@@ -14,6 +14,29 @@ pub struct SecretRecord {
     pub next_rotation_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub target: Option<RotationTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RotationTarget {
+    PgReplica(PgRoleTarget),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PgRoleTarget {
+    pub hosts: Vec<String>,
+    #[serde(default = "default_pg_database")]
+    pub database: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub login_secret: Option<String>,
+}
+
+fn default_pg_database() -> String {
+    "postgres".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

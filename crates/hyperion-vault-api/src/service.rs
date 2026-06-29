@@ -14,8 +14,11 @@ use crate::dto::{
 };
 use crate::error::{ApiError, ApiResult};
 use crate::lockout;
+use crate::pg_apply;
 use crate::state::AppState;
-use crate::store::{AuditEntry, Command, NextRotation, SecretRecord, VersionRecord};
+use crate::store::{
+    AuditEntry, Command, NextRotation, RotationTarget, SecretRecord, VersionRecord,
+};
 
 const MAX_NAME_LEN: usize = 255;
 const MAX_VALUE_LEN: usize = 1 << 16;
@@ -69,6 +72,7 @@ pub async fn create_secret(
         next_rotation_at,
         created_at: now,
         updated_at: now,
+        target: req.target.clone(),
     };
 
     state
@@ -346,6 +350,14 @@ pub async fn rotate(
         }
     };
 
+    if let (Some(target), SecretFormat::Userpass) = (&secret.target, secret.format) {
+        let (username, password) = (
+            payload.username.clone().unwrap_or_default(),
+            payload.password.clone().unwrap_or_default(),
+        );
+        apply_target(state, name, current_version, target, &username, &password).await?;
+    }
+
     let version = seal_version(state, name, new_version, &payload.bytes, now).await?;
     let interval = secret.rotation_interval_secs.unwrap_or(0);
 
@@ -437,6 +449,7 @@ fn to_metadata(secret: SecretRecord) -> SecretMetadata {
         next_rotation_at: rfc3339_opt(secret.next_rotation_at),
         created_at: rfc3339(secret.created_at),
         updated_at: rfc3339(secret.updated_at),
+        target: secret.target,
     }
 }
 
@@ -534,6 +547,40 @@ fn decode_payload(
             Ok((None, Some(up.username), Some(up.password)))
         }
     }
+}
+
+async fn apply_target(
+    state: &AppState,
+    name: &str,
+    current_version: i32,
+    target: &RotationTarget,
+    role_username: &str,
+    new_password: &str,
+) -> ApiResult<()> {
+    match target {
+        RotationTarget::PgReplica(pg) => {
+            let login = match &pg.login_secret {
+                Some(login) if login != name => load_current_userpass(state, login).await?,
+                _ => load_userpass(state, name, current_version).await?,
+            };
+            let role = pg.role.clone().unwrap_or_else(|| role_username.to_string());
+            pg_apply::apply_password(pg, &login.username, &login.password, &role, new_password)
+                .await
+                .map_err(|err| {
+                    ApiError::Internal(anyhow!("pg_replica password apply failed: {err}"))
+                })
+        }
+    }
+}
+
+async fn load_current_userpass(state: &AppState, name: &str) -> ApiResult<UserPass> {
+    let (_secret, version) = state
+        .store
+        .current_version(name.to_string())
+        .await?
+        .ok_or_else(|| ApiError::Internal(anyhow!("login secret '{name}' not found")))?;
+    let plaintext = open_version(state, name, version.version, &version).await?;
+    decode_userpass(&plaintext)
 }
 
 async fn load_userpass(state: &AppState, name: &str, version: i32) -> ApiResult<UserPass> {

@@ -437,6 +437,7 @@ mod tests {
             next_rotation_at: None,
             created_at: 0,
             updated_at: 0,
+            target: None,
         };
         let version = VersionRecord {
             version: 1,

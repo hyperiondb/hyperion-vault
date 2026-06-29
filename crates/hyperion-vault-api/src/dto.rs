@@ -1,6 +1,8 @@
 use hyperion_vault_core::{SecretFormat, SecretKind};
 use serde::{Deserialize, Serialize};
 
+use crate::store::RotationTarget;
+
 #[derive(Deserialize)]
 pub struct CreateSecretRequest {
     pub name: String,
@@ -17,6 +19,8 @@ pub struct CreateSecretRequest {
     pub rotation_interval_secs: Option<i64>,
     #[serde(default)]
     pub grace_period_secs: Option<i64>,
+    #[serde(default)]
+    pub target: Option<RotationTarget>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +85,8 @@ pub struct SecretMetadata {
     pub next_rotation_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<RotationTarget>,
 }
 
 #[derive(Serialize)]

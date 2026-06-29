@@ -112,12 +112,21 @@ client ──>│  API     │   │  API     │   │  API     │   reads: lo
 
 ---
 
+## Test
+
+```bash
+cargo test --workspace
+
+# fuzz tests
+cargo +nightly fuzz run crypto_roundtrip -- -max_total_time=60
+cargo +nightly fuzz run --features api raft_rpc_decode -- -max_total_time=60
+```
+
+---
+
 ## Quick start (local dev, no AWS)
 
 ```bash
-# Build + test the security core and store (no cluster needed)
-cargo test --workspace
-
 # Bring up a 3-node Raft cluster (KMS in local dev mode)
 cd docker && cp .env.example .env && docker compose up --build
 ```
@@ -145,6 +154,31 @@ curl -sS -X POST localhost:8200/v1/secrets \
   -H "Authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
   -d '{"name":"svc/api-key","kind":"automatic","rotation_interval_secs":86400,"grace_period_secs":3600}'
+```
+
+---
+
+## Required KMS permissions
+
+```json
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Effect": "Allow",
+			"Action": [
+				"kms:GenerateDataKey",
+				"kms:Encrypt",
+				"kms:Decrypt",
+				"kms:DescribeKey",
+				"kms:ListKeyRotations",
+				"kms:ReEncryptFrom",
+				"kms:ReEncryptTo"
+			],
+			"Resource": "arn:aws:kms:[region]:[account-id]:key/[key-id]"
+		}
+	]
+}
 ```
 
 ---
@@ -194,6 +228,7 @@ and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before deploying.
 - [docs/SECURITY.md](docs/SECURITY.md) - security
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) - threat model
 - [docs/API.md](docs/API.md) - REST API
+- [docs/INTEGRATION.md](docs/INTEGRATION.md) - ciqadamq / pg_replica / server-backend integration (A→Z)
 - [docs/WIREGUARD.md](docs/WIREGUARD.md) - optional admin access over WireGuard
 
 ## License
