@@ -15,7 +15,7 @@ serde_json = "1"
 hyperion-vault-core = { path = "../crates/hyperion-vault-core" }
 hyperion-vault-api = { path = "../crates/hyperion-vault-api", optional = true }
 # Pinned identically to the workspace so its TypeConfig types unify with the API crate's.
-openraft = { version = "=0.9.24", features = ["serde", "storage-v2", "loosen-follower-log-revert"], optional = true }
+openraft = { version = "=0.9.25", features = ["serde", "storage-v2", "loosen-follower-log-revert"], optional = true }
 
 [features]
 # The API targets pull in the full server dependency tree (redb, openraft,
