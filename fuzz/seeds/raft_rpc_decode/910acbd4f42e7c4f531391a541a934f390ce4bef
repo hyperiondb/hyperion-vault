@@ -1,0 +1,1 @@
+{"vote":{"leader_id":{"term":7,"node_id":1},"committed":false},"meta":0{"last_log_id":{"leader_id":{"term":7,"node_id":1},"index":43},"last_membership":{"log_it":{"leader_id":{"term":7,"node_id":1},"index":43},"membership":{"configs":[[1,2,3]],"nodes":{"1":"done":true}

@@ -1,0 +1,1 @@
+{"name":"app/ey","kind":"automatic","username":"svc","rotation_interval_smcs":86400,"grace_pes":["10wrcae_period_secs0.0.3:5432"],"database":"postgres","role":"svc","login_secret":"db/admin"}}

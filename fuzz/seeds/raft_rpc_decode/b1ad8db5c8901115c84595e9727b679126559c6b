@@ -1,0 +1,1 @@
+{"vote":{"leader_id":{"term":7,"node_id":1},"committed":false},"last_lo_log_id":{"leaderm":7,"node_id":1},"index":43},"last_membership":{m":7,"node_id":1},":{"addr":"vault1:7400"},"2":{"addr":"vault01,100,3AppendAudit7,108,108,44,34,109,101,109,98,101,1er_id":{"term":6,"nodd":1},"index":39}}

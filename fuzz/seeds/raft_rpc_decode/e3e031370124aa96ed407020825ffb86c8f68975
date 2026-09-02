@@ -1,0 +1,1 @@
+{"vote":{"leader_id":{"term":7,"node_id":1},"committed":false},"meta":{"last_log_id":{"leader_id":{"term":7,"node_id":1},"index":43},"last_membership":{"vote":{"leader_id":{"term":7,"node_id":1},"comm":7,"node_DeleteRoledex":43},"entries":[],"leader_commit{"vo"r":"vault1:7400"},"2":{"addr":"vault2:7400"},"3":{"addr":"vault2:":{"lea":7,"nod:true}

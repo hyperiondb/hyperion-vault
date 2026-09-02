@@ -1,0 +1,1 @@
+{"name":"payments","description":"stripe only","Is_admin":false,"permissions":[{"action":"create","path":"stmembcommitted_leader_idcreate","path":"spe/*"}]}

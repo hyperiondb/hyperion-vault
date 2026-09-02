@@ -1,0 +1,1 @@
+{"log_id":{"leader_id":{"term":7,"node_id":1},"index":43},"payload":{"Membership":{"configs":[[1,2,3]],"nodes":{"1":{"addr":"vault1:7400"},"2":{"addr":"vault2:7400"},"3":{"addr":ŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸŸ"vault3:7400"}}}}}

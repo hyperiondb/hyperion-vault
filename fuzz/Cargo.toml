@@ -14,14 +14,23 @@ serde_json = "1"
 
 hyperion-vault-core = { path = "../crates/hyperion-vault-core" }
 hyperion-vault-api = { path = "../crates/hyperion-vault-api", optional = true }
-# Pinned identically to the workspace so its TypeConfig types unify with the API crate's.
+# Pinned identically to the workspace so their types unify with the API crate's.
 openraft = { version = "=0.9.25", features = ["serde", "storage-v2", "loosen-follower-log-revert"], optional = true }
+redb = { version = "=4.1.0", optional = true }
+axum = { version = "=0.8.9", optional = true }
+tokio = { version = "=1.52.3", features = ["rt"], optional = true }
 
 [features]
 # The API targets pull in the full server dependency tree (redb, openraft,
 # aws-sdk-kms, ...). They are opt-in so the lightweight core targets build fast.
 #   cargo +nightly fuzz run --features api store_decode
-api = ["dep:hyperion-vault-api", "dep:openraft"]
+api = [
+    "dep:hyperion-vault-api",
+    "dep:openraft",
+    "dep:redb",
+    "dep:axum",
+    "dep:tokio",
+]
 
 # Detach from the parent workspace so `cargo build/test --workspace` and the
 # stable-pinned CI never try to compile this nightly-only crate.
@@ -110,6 +119,76 @@ bench = false
 [[bin]]
 name = "dto_decode"
 path = "fuzz_targets/dto_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "store_key_encoding"
+path = "fuzz_targets/store_key_encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "name_validation"
+path = "fuzz_targets/name_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bearer_token_parse"
+path = "fuzz_targets/bearer_token_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "forwarded_for_parse"
+path = "fuzz_targets/forwarded_for_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pg_hostport"
+path = "fuzz_targets/pg_hostport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_parse_peers"
+path = "fuzz_targets/config_parse_peers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "backup_restore_roundtrip"
+path = "fuzz_targets/backup_restore_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apply_command_sequence"
+path = "fuzz_targets/apply_command_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raft_log_normalize"
+path = "fuzz_targets/raft_log_normalize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_install"
+path = "fuzz_targets/snapshot_install.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,1 @@
+{"name":"app/api-key","kind":"automatic","username":"svc","rotation_interval_secs":86400,"grace_period_secs":600,"target"6{"type":"pg_replica","hosts":["10wrcae_period_secs0.0.3:5432"],"database":"postgres","role":"svcis_admin_secret":"db/admin"}}

@@ -1,0 +1,1 @@
+{"name":"payments","description":"stripe only","adsi_min":false,"permiswions":[{"action":"craeet","path":"stripe/*"},{"action":"rotate","path":"stripe/*"}]}

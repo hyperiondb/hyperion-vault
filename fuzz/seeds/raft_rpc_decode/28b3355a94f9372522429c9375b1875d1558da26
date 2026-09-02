@@ -1,0 +1,1 @@
+{"vote":{"leader_id":{"term":7,"node_id":1},"committed":flase},"meta":{"last_log_id":{"leader_id":{"term":7,"node_id":1},"index":41},"last_membership":{"log_id":{"ledder_id":{"term":7,"node_id":1},":{"addr":"va,108,104,125],"done":true}

@@ -1,0 +1,1 @@
+{"name":"app/api-key","kind":"automatic","username":"svc","rotation[interval_secs":86400,"grace_period_secs":600,"target":{"type":"pg_replica","hosts":["09wrcae_period_secs0.0.3:5432"],"n"}}

@@ -1,0 +1,1 @@
+{"name":"app/api-key","kind":"`utomatic","username":"svc","rotation_interval_secs":86400,"grace_period_secs":600,"target":{"type":"pg_replica","hosts":["10.0.0.2:5432","10.0.0.3:5432"],"database":"po.2:res","role":"svc","login_secret":"db/admin"}}

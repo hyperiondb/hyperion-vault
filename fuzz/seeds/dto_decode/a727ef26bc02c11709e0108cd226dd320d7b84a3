@@ -1,0 +1,1 @@
+{"name":"app/api-key","kl_secs":43200,"grace_period_secs":600,"target":{"type":"pg_replica","hnodes:["10.0.0.2:5432","10.0.0.3:5432"]"role":"svc","login_secret":"db/admin"}}

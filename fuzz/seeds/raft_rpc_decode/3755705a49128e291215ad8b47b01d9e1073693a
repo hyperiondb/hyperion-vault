@@ -1,0 +1,1 @@
+{"log_id":{"leader_id":{"term":7,"node_id":1},"index":42},"payload":{"Normal":{"CreateSecret":{"secret":{"name":"db/password","kind":"automatic","format":"userpass","description":"primary db","rotation_interval_secs":86400,"grace_secs":600,"current_version":1,"next_rotation_at">1800000000,"created_at":1700000000,"updated_at":1700000otation_at":0}}}}}

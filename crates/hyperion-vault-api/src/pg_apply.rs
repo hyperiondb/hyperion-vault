@@ -87,7 +87,7 @@ async fn try_rotate(
     }
 }
 
-fn split_hostport(hostport: &str) -> (&str, u16) {
+pub fn split_hostport(hostport: &str) -> (&str, u16) {
     match hostport.rsplit_once(':') {
         Some((host, port)) => (host, port.parse().unwrap_or(5432)),
         None => (hostport, 5432),

@@ -1,0 +1,1 @@
+{"name":"app/api-key","kind":"automatic","username":"svc","rotation_interval_secs":86400et":{"node_idod_secs":060,"target":{"node_idtype":"pg_replica","hosts":["gin_secret":"db/admin"}}

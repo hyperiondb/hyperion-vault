@@ -121,7 +121,7 @@ impl Config {
     }
 }
 
-fn parse_peers(raw: &str) -> Result<BTreeMap<u64, String>> {
+pub fn parse_peers(raw: &str) -> Result<BTreeMap<u64, String>> {
     let mut map = BTreeMap::new();
     for entry in raw.split(',') {
         let entry = entry.trim();

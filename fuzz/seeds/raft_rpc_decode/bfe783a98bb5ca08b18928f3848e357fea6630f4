@@ -1,0 +1,1 @@
+{"vote":{"leader_id":{"term":7,"node_id":1},"committed":false},"preentriesd":{"leadeÉ_id":{"term":7,"node_id":1},"index":40},"entrinamees":[{"log_id":{"leader_id":{"term":3,"node_id":1},"index":41},"payload":"Blank"},{"log_id":{"leadterval_secs":86400,"grace_secs":600,"cid":1},"index":40}}

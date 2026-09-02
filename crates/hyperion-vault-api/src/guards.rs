@@ -97,7 +97,7 @@ impl FromRequestParts<SharedState> for ReaderGuard {
     }
 }
 
-fn bearer_token(parts: &Parts) -> Option<String> {
+pub fn bearer_token(parts: &Parts) -> Option<String> {
     let header = parts.headers.get(AUTHORIZATION)?.to_str().ok()?;
     let token = header
         .strip_prefix("Bearer ")
@@ -110,7 +110,7 @@ fn bearer_token(parts: &Parts) -> Option<String> {
     }
 }
 
-fn client_ip(parts: &Parts, trust_proxy: bool) -> Option<IpAddr> {
+pub fn client_ip(parts: &Parts, trust_proxy: bool) -> Option<IpAddr> {
     if trust_proxy {
         if let Some(value) = parts
             .headers

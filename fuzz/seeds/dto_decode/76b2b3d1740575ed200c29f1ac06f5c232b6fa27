@@ -1,0 +1,1 @@
+{"name":"app/api-key","kind":"aumtiatoc","username":"svc","rotation_interval_smcs":86400,"grace_period_secs":600,"target_interval_smcs":86400,"grace_period_secs":600,"target":{"type":"pg_rtabase":"postgres","role"Y"svc","logiî_secret":"db/admin"}}

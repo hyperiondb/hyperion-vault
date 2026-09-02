@@ -1,4 +1,4 @@
-.PHONY: all api test test-core test-security e2e fmt clippy clean docker-up docker-down
+.PHONY: all api test test-core test-security fuzz fuzz-build e2e fmt clippy clean docker-up docker-down
 
 all: api
 
@@ -13,6 +13,16 @@ test-security:
 
 test:
 	cargo test --workspace
+
+# Nightly-only; see fuzz/README.md. fuzz-build only checks that every target
+# still compiles, fuzz sweeps them all for BUDGET seconds each (default 60).
+BUDGET ?= 60
+
+fuzz-build:
+	cargo +nightly fuzz build --features api
+
+fuzz:
+	bash fuzz/run-all.sh $(BUDGET)
 
 e2e:
 	bash scripts/e2e.sh

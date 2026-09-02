@@ -1,0 +1,1 @@
+{"vote":{"leader_id":{"term":7,"node_id":1},"#ommitted":false},"meversionsst_log_id":{"leader_id":{"term":7,"node_id":1},"index":43},"last_membership":{"log_id":{"":[[1,2,3]],"nodes":{"1":{"addr":"vault1:7400"},"2":{

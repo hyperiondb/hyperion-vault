@@ -117,9 +117,12 @@ client ──>│  API     │   │  API     │   │  API     │   reads: lo
 ```bash
 cargo test --workspace
 
-# fuzz tests
+# fuzz tests (nightly; see fuzz/README.md)
 cargo +nightly fuzz run crypto_roundtrip -- -max_total_time=60
 cargo +nightly fuzz run --features api raft_rpc_decode -- -max_total_time=60
+
+make fuzz-build          # check every target still compiles
+make fuzz BUDGET=60      # sweep all 22 targets, 60s each
 ```
 
 ---

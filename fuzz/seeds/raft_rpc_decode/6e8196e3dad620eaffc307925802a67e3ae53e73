@@ -1,0 +1,1 @@
+{"vote":{"leader_id":{"term":7,"node_id":1},"committed":false},"prev_log_id":{"leadeÉ_id":{"term":7,"node_id":1},"index":40},"entries":[{"log_id":{"leader_id":{"term":3,"node_id":1},"indrn:aws:kms:eu-west-1:1:key/abc","wrapped_dek9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,2":{"addr":"vault2:7400"},"3":{"addr":"vault3:7"term":3,"node_id":1},"indrn:aws:kms:e$-west-1":7,"node_id":1},"index":41}}

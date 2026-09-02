@@ -1,0 +1,1 @@
+{"vote":{"leader_t_membership":{"log_id":{"leader_id":{"term":7,"node_id":1},"index":43},"membership":{"configs":[[1,2,3]],"nodes":{"1":{"addr":"vault1:7400"},"2":{

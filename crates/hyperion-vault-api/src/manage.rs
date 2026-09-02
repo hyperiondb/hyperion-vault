@@ -189,7 +189,7 @@ fn to_role_info(role: RoleRecord) -> RoleInfo {
     }
 }
 
-fn validate_role_name(name: &str) -> ApiResult<()> {
+pub fn validate_role_name(name: &str) -> ApiResult<()> {
     if name.trim().is_empty() || name.len() > 255 {
         return Err(ApiError::BadRequest(
             "role name must be between 1 and 255 characters".into(),
@@ -198,7 +198,7 @@ fn validate_role_name(name: &str) -> ApiResult<()> {
     Ok(())
 }
 
-fn validate_permissions(permissions: &[PermissionRule]) -> ApiResult<()> {
+pub fn validate_permissions(permissions: &[PermissionRule]) -> ApiResult<()> {
     for perm in permissions {
         if !rbac::is_valid_action(&perm.action) {
             return Err(ApiError::BadRequest(format!(

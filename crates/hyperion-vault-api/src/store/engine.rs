@@ -44,11 +44,11 @@ pub struct RedbStore {
 
 impl RedbStore {
     pub fn open(path: impl AsRef<Path>, node_id: u64) -> Result<Arc<Self>> {
-        let db = Database::create(path)?;
-        let store = Arc::new(Self {
-            db: Arc::new(db),
-            node_id,
-        });
+        Self::from_database(Arc::new(Database::create(path)?), node_id)
+    }
+
+    pub fn from_database(db: Arc<Database>, node_id: u64) -> Result<Arc<Self>> {
+        let store = Arc::new(Self { db, node_id });
         store.init_tables()?;
         store.seed_admin_role()?;
         Ok(store)

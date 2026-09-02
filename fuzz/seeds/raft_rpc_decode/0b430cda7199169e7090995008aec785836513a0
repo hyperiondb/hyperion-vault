@@ -1,0 +1,1 @@
+{"log_id":{"vote":{"leader_id":{"term":7,"node_id":1},"committed{{":false},"prev_log_id":{"leader_id":{"term":7,"node_id":1},"index":40},"entries":[{"log_id":{"leader_id":{"term":3,"node_id":1},"index":41},"payload":"Blank"},{"log_id":{"leader_id":{"term":7,"node_id":1},"index":42},"p_dek":[1,2,3,"4,5,6l",7,8],"nonce":[,,999

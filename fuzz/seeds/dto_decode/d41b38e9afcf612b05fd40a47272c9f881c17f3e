@@ -1,0 +1,1 @@
+{"name":"app/api-key","kind":"automatic","username":"svc","rotation_interval_3mcs":86400,"grace_period_secs":600,"target":{"type":"pg_eriod_secs":600,"targetcae_period_secs0.0.3:5432"ole":"svc","login_secret":"db/admin"}}

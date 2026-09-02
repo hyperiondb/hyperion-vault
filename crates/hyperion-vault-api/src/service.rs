@@ -518,7 +518,7 @@ fn build_create_payload(req: &CreateSecretRequest) -> ApiResult<Payload> {
     }
 }
 
-fn encode_userpass(username: &str, password: &str) -> Vec<u8> {
+pub fn encode_userpass(username: &str, password: &str) -> Vec<u8> {
     serde_json::to_vec(&UserPass {
         username: username.to_string(),
         password: password.to_string(),
@@ -526,7 +526,7 @@ fn encode_userpass(username: &str, password: &str) -> Vec<u8> {
     .expect("userpass serialization is infallible")
 }
 
-fn decode_userpass(bytes: &[u8]) -> ApiResult<UserPass> {
+pub fn decode_userpass(bytes: &[u8]) -> ApiResult<UserPass> {
     serde_json::from_slice(bytes)
         .map_err(|_| ApiError::Internal(anyhow!("stored userpass payload is malformed")))
 }
@@ -687,7 +687,7 @@ pub(crate) async fn audit(
     }
 }
 
-fn validate_name(name: &str) -> ApiResult<()> {
+pub fn validate_name(name: &str) -> ApiResult<()> {
     if name.is_empty() || name.len() > MAX_NAME_LEN {
         return Err(ApiError::BadRequest(
             "secret name must be between 1 and 255 characters".into(),
@@ -704,14 +704,14 @@ fn validate_name(name: &str) -> ApiResult<()> {
     Ok(())
 }
 
-fn validate_value(value: &str) -> ApiResult<()> {
+pub fn validate_value(value: &str) -> ApiResult<()> {
     if value.len() > MAX_VALUE_LEN {
         return Err(ApiError::BadRequest("secret value is too large".into()));
     }
     Ok(())
 }
 
-fn validate_field(label: &str, value: &str) -> ApiResult<()> {
+pub fn validate_field(label: &str, value: &str) -> ApiResult<()> {
     if value.is_empty() {
         return Err(ApiError::BadRequest(format!("{label} must not be empty")));
     }
@@ -721,7 +721,7 @@ fn validate_field(label: &str, value: &str) -> ApiResult<()> {
     Ok(())
 }
 
-fn normalize_grace(grace: Option<i64>) -> ApiResult<i64> {
+pub fn normalize_grace(grace: Option<i64>) -> ApiResult<i64> {
     match grace {
         None => Ok(0),
         Some(secs) if secs >= 0 => Ok(secs),

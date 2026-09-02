@@ -1,0 +1,1 @@
+{"vote":{"leader_id":{"term":7,"node_id":1},"committed":false},"meta":wrapped_rotation_atader_id":{"term":7,"node_id":1},"index":4last_swept_at:1},"index":43},"membership":{"configs":[[1,2,3]],"nodes":{"1":{"addr":"vault1:7400"},"2":{"addr":"vault2:7400"},"3"){"addr":"vault3:7400"}}}},"snapshot_id":"7-43"}8,1od]2n,"5e":true}
