@@ -1,6 +1,9 @@
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is committed on purpose. Every crate here that CI builds
+# produces a binary, and the AWS SDK pins only its direct versions --
+# without a committed lock, a fresh resolve picks two incompatible
+# aws-smithy-schema versions and `cargo clippy --workspace` fails.
 *.so
 .pgrx/
 /data/

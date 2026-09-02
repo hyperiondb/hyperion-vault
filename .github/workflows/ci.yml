@@ -38,8 +38,11 @@ jobs:
       # run-all.sh treats the targets listed in its KNOWN_FAILING map as
       # expected failures (each names the VULN.md finding it reproduces) and
       # fails the job on any other non-zero exit.
+      # Invoked through bash because run-all.sh is stored without the
+      # executable bit (and the repo is developed on Windows, where git's
+      # core.fileMode is off, so that bit cannot be set from there).
       - name: short sweep
-        run: ./fuzz/run-all.sh 30
+        run: bash fuzz/run-all.sh 30
       - name: upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4

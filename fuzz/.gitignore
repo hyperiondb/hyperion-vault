@@ -1,5 +1,6 @@
+# Cargo.lock is committed here too: this crate is detached from the parent
+# workspace, so it resolves its own dependency versions.
 target/
 corpus/
 artifacts/
 coverage/
-Cargo.lock

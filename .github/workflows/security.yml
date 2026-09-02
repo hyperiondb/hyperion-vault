@@ -45,8 +45,11 @@ jobs:
             fuzz
       - name: install cargo-fuzz
         run: cargo install --locked cargo-fuzz
+      # Invoked through bash because run-all.sh is stored without the
+      # executable bit (and the repo is developed on Windows, where git's
+      # core.fileMode is off, so that bit cannot be set from there).
       - name: 10 minutes per target
-        run: ./fuzz/run-all.sh 600
+        run: bash fuzz/run-all.sh 600
       - name: upload crash artifacts
         if: always()
         uses: actions/upload-artifact@v4
