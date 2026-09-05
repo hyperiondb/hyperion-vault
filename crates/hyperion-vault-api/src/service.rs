@@ -5,8 +5,13 @@ use zeroize::Zeroizing;
 
 use hyperion_vault_core::auth;
 use hyperion_vault_core::crypto::{generate_nonce, open, seal, Dek, NONCE_LEN};
+use hyperion_vault_core::rotation::{
+    grace_expiry_unix, next_rotation_unix, next_version, MAX_GRACE_SECS, MAX_ROTATION_INTERVAL_SECS,
+};
 use hyperion_vault_core::types::aad_for;
-use hyperion_vault_core::{SecretFormat, SecretKind};
+use hyperion_vault_core::{
+    is_normalized_secret_name, is_valid_secret_name, SecretFormat, SecretKind, MAX_SECRET_NAME_LEN,
+};
 
 use crate::clock::{now_unix, rfc3339, rfc3339_opt};
 use crate::dto::{
@@ -20,9 +25,10 @@ use crate::store::{
     AuditEntry, Command, NextRotation, RotationTarget, SecretRecord, VersionRecord,
 };
 
-const MAX_NAME_LEN: usize = 255;
 const MAX_VALUE_LEN: usize = 1 << 16;
 const MAX_BATCH: usize = 256;
+const APPLY_RETRY_SECS: i64 = 60;
+const MAX_LOGIN_CANDIDATES: usize = 4;
 
 struct Payload {
     format: SecretFormat,
@@ -39,16 +45,17 @@ pub async fn create_secret(
 ) -> ApiResult<SecretValue> {
     validate_name(&req.name)?;
     let grace = normalize_grace(req.grace_period_secs)?;
+    if let Some(target) = &req.target {
+        validate_target(state, target)?;
+    }
 
-    if req.kind == SecretKind::Automatic {
-        match req.rotation_interval_secs {
-            Some(secs) if secs > 0 => {}
-            _ => {
-                return Err(ApiError::BadRequest(
-                    "automatic secret requires positive 'rotation_interval_secs'".into(),
-                ))
-            }
-        }
+    if let Some(secs) = req.rotation_interval_secs {
+        validate_interval(secs)?;
+    }
+    if req.kind == SecretKind::Automatic && req.rotation_interval_secs.is_none() {
+        return Err(ApiError::BadRequest(
+            "automatic secret requires positive 'rotation_interval_secs'".into(),
+        ));
     }
 
     let payload = build_create_payload(&req)?;
@@ -56,7 +63,8 @@ pub async fn create_secret(
     let version = seal_version(state, &req.name, 1, &payload.bytes, now).await?;
 
     let next_rotation_at = if req.kind == SecretKind::Automatic {
-        req.rotation_interval_secs.map(|secs| now + secs)
+        req.rotation_interval_secs
+            .map(|secs| next_rotation_unix(now, secs))
     } else {
         None
     };
@@ -98,6 +106,7 @@ pub async fn get_secret(
     name: &str,
     client_ip: Ipv4Addr,
 ) -> ApiResult<SecretValue> {
+    known_name(name)?;
     let (secret, version) = match state.store.current_version(name.to_string()).await? {
         Some(pair) => pair,
         None => {
@@ -147,6 +156,18 @@ pub async fn get_secrets(
 
     let mut out = Vec::with_capacity(names.len());
     for name in names {
+        if known_name(&name).is_err() {
+            audit(
+                state,
+                None,
+                Some(client_ip),
+                "get",
+                Some(&name),
+                "not_found",
+            )
+            .await;
+            continue;
+        }
         match state.store.current_version(name.clone()).await? {
             Some((secret, version)) => {
                 let plaintext = open_version(state, &name, version.version, &version).await?;
@@ -186,18 +207,10 @@ pub async fn update_secret(
     req: UpdateSecretRequest,
 ) -> ApiResult<SecretMetadata> {
     if let Some(secs) = req.rotation_interval_secs {
-        if secs <= 0 {
-            return Err(ApiError::BadRequest(
-                "rotation_interval_secs must be positive".into(),
-            ));
-        }
+        validate_interval(secs)?;
     }
     if let Some(secs) = req.grace_period_secs {
-        if secs < 0 {
-            return Err(ApiError::BadRequest(
-                "grace_period_secs must not be negative".into(),
-            ));
-        }
+        normalize_grace(Some(secs))?;
     }
 
     let secret = state
@@ -251,19 +264,19 @@ pub async fn update_secret(
             }
         };
 
-        let new_version = current_version + 1;
+        let new_version = next_version(current_version).ok_or_else(too_many_versions)?;
         let version = seal_version(state, name, new_version, &bytes, now).await?;
         let reset_timer = kind == SecretKind::Automatic;
         Command::PutVersion {
             name: name.to_string(),
             expected_current: current_version,
             version,
-            supersede_expires_at: Some(now + secret.grace_secs),
+            supersede_expires_at: Some(grace_expiry_unix(now, secret.grace_secs)),
             set_description: req.description.clone(),
             set_rotation_interval_secs: req.rotation_interval_secs,
             set_grace_secs: req.grace_period_secs,
             next_rotation_at: if reset_timer {
-                NextRotation::Set(Some(now + effective_interval))
+                NextRotation::Set(Some(next_rotation_unix(now, effective_interval)))
             } else {
                 NextRotation::Keep
             },
@@ -278,7 +291,7 @@ pub async fn update_secret(
             set_rotation_interval_secs: req.rotation_interval_secs,
             set_grace_secs: req.grace_period_secs,
             next_rotation_at: if reset_timer {
-                NextRotation::Set(Some(now + effective_interval))
+                NextRotation::Set(Some(next_rotation_unix(now, effective_interval)))
             } else {
                 NextRotation::Keep
             },
@@ -322,7 +335,7 @@ pub async fn rotate(
     }
 
     let current_version = secret.current_version;
-    let new_version = current_version + 1;
+    let new_version = next_version(current_version).ok_or_else(too_many_versions)?;
     let now = now_unix();
 
     let payload = match secret.format {
@@ -350,31 +363,57 @@ pub async fn rotate(
         }
     };
 
-    if let (Some(target), SecretFormat::Userpass) = (&secret.target, secret.format) {
-        let (username, password) = (
-            payload.username.clone().unwrap_or_default(),
-            payload.password.clone().unwrap_or_default(),
-        );
-        apply_target(state, name, current_version, target, &username, &password).await?;
-    }
-
     let version = seal_version(state, name, new_version, &payload.bytes, now).await?;
     let interval = secret.rotation_interval_secs.unwrap_or(0);
 
+    // The new version is committed before it is applied to the external system.
+    // A concurrent rotation loses here, on expected_current, and never touches
+    // the external system; and a failed apply leaves a password the vault knows
+    // rather than one only the external system knows.
     state
         .store
         .apply(Command::PutVersion {
             name: name.to_string(),
             expected_current: current_version,
             version,
-            supersede_expires_at: Some(now + secret.grace_secs),
+            supersede_expires_at: Some(grace_expiry_unix(now, secret.grace_secs)),
             set_description: None,
             set_rotation_interval_secs: None,
             set_grace_secs: None,
-            next_rotation_at: NextRotation::Set(Some(now + interval)),
+            next_rotation_at: NextRotation::Set(Some(next_rotation_unix(now, interval))),
             updated_at: now,
         })
         .await?;
+
+    if let (Some(target), SecretFormat::Userpass) = (&secret.target, secret.format) {
+        let (username, password) = (
+            payload.username.clone().unwrap_or_default(),
+            payload.password.clone().unwrap_or_default(),
+        );
+        if let Err(err) = apply_target(
+            state,
+            name,
+            current_version,
+            now,
+            target,
+            &username,
+            &password,
+        )
+        .await
+        {
+            schedule_apply_retry(state, name, new_version, now).await;
+            audit(
+                state,
+                Some(actor),
+                client_ip,
+                "rotate",
+                Some(name),
+                "apply_failed",
+            )
+            .await;
+            return Err(err);
+        }
+    }
 
     audit(state, Some(actor), client_ip, "rotate", Some(name), "ok").await;
 
@@ -394,8 +433,27 @@ pub async fn verify(
     state: &AppState,
     name: &str,
     client_ip: Ipv4Addr,
+    peer_ip: IpAddr,
     presented: &str,
 ) -> ApiResult<VerifyResponse> {
+    known_name(name)?;
+    lockout::check_verify(state, peer_ip, name).await?;
+    if presented.is_empty() {
+        audit(
+            state,
+            None,
+            Some(client_ip),
+            "verify",
+            Some(name),
+            "invalid",
+        )
+        .await;
+        lockout::record_verify(state, peer_ip, name).await;
+        return Ok(VerifyResponse {
+            valid: false,
+            version: None,
+        });
+    }
     let now = now_unix();
 
     if let Some(secret) = state.store.secret(name.to_string()).await? {
@@ -430,7 +488,7 @@ pub async fn verify(
         "invalid",
     )
     .await;
-    lockout::record(state, Some(IpAddr::V4(client_ip))).await;
+    lockout::record_verify(state, peer_ip, name).await;
     Ok(VerifyResponse {
         valid: false,
         version: None,
@@ -549,27 +607,115 @@ fn decode_payload(
     }
 }
 
+fn validate_target(state: &AppState, target: &RotationTarget) -> ApiResult<()> {
+    match target {
+        RotationTarget::PgReplica(pg) => {
+            if let Some(login) = &pg.login_secret {
+                validate_name(login)?;
+            }
+            if let Some(role) = &pg.role {
+                validate_field("target.role", role)?;
+            }
+            state
+                .pg_targets
+                .check(pg)
+                .map_err(|err| ApiError::BadRequest(err.to_string()))
+        }
+    }
+}
+
 async fn apply_target(
     state: &AppState,
     name: &str,
-    current_version: i32,
+    previous_version: i32,
+    now: i64,
     target: &RotationTarget,
     role_username: &str,
     new_password: &str,
 ) -> ApiResult<()> {
     match target {
         RotationTarget::PgReplica(pg) => {
-            let login = match &pg.login_secret {
-                Some(login) if login != name => load_current_userpass(state, login).await?,
-                _ => load_userpass(state, name, current_version).await?,
+            let logins = match &pg.login_secret {
+                Some(login) if login != name => vec![load_current_userpass(state, login).await?],
+                _ => self_login_candidates(state, name, previous_version, now).await?,
             };
+            if logins.is_empty() {
+                return Err(ApiError::Internal(anyhow!(
+                    "no stored credential to authenticate the pg_replica apply for '{name}'"
+                )));
+            }
             let role = pg.role.clone().unwrap_or_else(|| role_username.to_string());
-            pg_apply::apply_password(pg, &login.username, &login.password, &role, new_password)
+
+            let mut last_err = None;
+            for login in logins {
+                match pg_apply::apply_password(
+                    &state.pg_targets,
+                    pg,
+                    &login.username,
+                    &login.password,
+                    &role,
+                    new_password,
+                )
                 .await
-                .map_err(|err| {
-                    ApiError::Internal(anyhow!("pg_replica password apply failed: {err}"))
-                })
+                {
+                    Ok(()) => return Ok(()),
+                    Err(err) => last_err = Some(err),
+                }
+            }
+            Err(ApiError::Internal(anyhow!(
+                "pg_replica password apply failed: {}",
+                last_err.expect("the candidate list is not empty")
+            )))
         }
+    }
+}
+
+// When a secret authenticates as itself, the password the external system holds
+// may be the one just superseded, or an older one if an earlier apply failed
+// after its version was committed. Try them newest-superseded first.
+async fn self_login_candidates(
+    state: &AppState,
+    name: &str,
+    previous_version: i32,
+    now: i64,
+) -> ApiResult<Vec<UserPass>> {
+    let mut versions = vec![previous_version];
+    for record in state.store.live_versions(name.to_string(), now).await? {
+        if !versions.contains(&record.version) {
+            versions.push(record.version);
+        }
+    }
+    versions.truncate(MAX_LOGIN_CANDIDATES);
+
+    let mut out = Vec::new();
+    for version in versions {
+        let Some(record) = state.store.version(name.to_string(), version).await? else {
+            continue;
+        };
+        let plaintext = open_version(state, name, version, &record).await?;
+        if let Ok(login) = decode_userpass(&plaintext) {
+            out.push(login);
+        }
+    }
+    Ok(out)
+}
+
+async fn schedule_apply_retry(state: &AppState, name: &str, current_version: i32, now: i64) {
+    let command = Command::UpdateMeta {
+        name: name.to_string(),
+        expected_current: current_version,
+        set_description: None,
+        set_rotation_interval_secs: None,
+        set_grace_secs: None,
+        next_rotation_at: NextRotation::Set(Some(next_rotation_unix(now, APPLY_RETRY_SECS))),
+        updated_at: now,
+    };
+    if let Err(err) = state.store.apply(command).await {
+        tracing::warn!(
+            secret = name,
+            error = %err,
+            "rotation applied to the vault but not to the target, and the retry could not be scheduled"
+        );
     }
 }
 
@@ -688,23 +834,57 @@ pub(crate) async fn audit(
 }
 
 pub fn validate_name(name: &str) -> ApiResult<()> {
-    if name.is_empty() || name.len() > MAX_NAME_LEN {
-        return Err(ApiError::BadRequest(
-            "secret name must be between 1 and 255 characters".into(),
-        ));
+    if name.is_empty() || name.len() > MAX_SECRET_NAME_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "secret name must be between 1 and {MAX_SECRET_NAME_LEN} characters"
+        )));
     }
-    let ok = name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'));
-    if !ok {
+    if !is_valid_secret_name(name) {
         return Err(ApiError::BadRequest(
             "secret name may contain only [A-Za-z0-9-_/.]".into(),
+        ));
+    }
+    if !is_normalized_secret_name(name) {
+        return Err(ApiError::BadRequest(
+            "secret name must not start or end with '/', or contain an empty, '.' or '..' segment"
+                .into(),
         ));
     }
     Ok(())
 }
 
+fn known_name(name: &str) -> ApiResult<()> {
+    if is_valid_secret_name(name) {
+        Ok(())
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+fn too_many_versions() -> ApiError {
+    ApiError::Conflict("secret has reached the maximum version number".into())
+}
+
+pub fn validate_interval(secs: i64) -> ApiResult<()> {
+    if secs <= 0 {
+        return Err(ApiError::BadRequest(
+            "rotation_interval_secs must be positive".into(),
+        ));
+    }
+    if secs > MAX_ROTATION_INTERVAL_SECS {
+        return Err(ApiError::BadRequest(format!(
+            "rotation_interval_secs must not exceed {MAX_ROTATION_INTERVAL_SECS}"
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate_value(value: &str) -> ApiResult<()> {
+    if value.is_empty() {
+        return Err(ApiError::BadRequest(
+            "secret value must not be empty".into(),
+        ));
+    }
     if value.len() > MAX_VALUE_LEN {
         return Err(ApiError::BadRequest("secret value is too large".into()));
     }
@@ -724,10 +904,13 @@ pub fn validate_field(label: &str, value: &str) -> ApiResult<()> {
 pub fn normalize_grace(grace: Option<i64>) -> ApiResult<i64> {
     match grace {
         None => Ok(0),
-        Some(secs) if secs >= 0 => Ok(secs),
-        Some(_) => Err(ApiError::BadRequest(
+        Some(secs) if secs < 0 => Err(ApiError::BadRequest(
             "grace_period_secs must not be negative".into(),
         )),
+        Some(secs) if secs > MAX_GRACE_SECS => Err(ApiError::BadRequest(format!(
+            "grace_period_secs must not exceed {MAX_GRACE_SECS}"
+        ))),
+        Some(secs) => Ok(secs),
     }
 }
 
@@ -759,6 +942,53 @@ mod tests {
         assert!(value.is_none());
         assert_eq!(username.as_deref(), Some("bob"));
         assert_eq!(password.as_deref(), Some("pw"));
+    }
+
+    #[test]
+    fn an_empty_opaque_value_is_refused() {
+        assert!(validate_value("").is_err());
+        assert!(validate_value("x").is_ok());
+    }
+
+    #[test]
+    fn a_name_with_dot_segments_is_refused() {
+        assert!(validate_name("db/password").is_ok());
+        assert!(validate_name("a/../b").is_err());
+        assert!(validate_name("a//b").is_err());
+        assert!(validate_name("/a").is_err());
+        assert!(validate_name("a/").is_err());
+    }
+
+    #[test]
+    fn rotation_interval_is_bounded() {
+        assert!(validate_interval(60).is_ok());
+        assert!(validate_interval(MAX_ROTATION_INTERVAL_SECS).is_ok());
+        assert!(validate_interval(0).is_err());
+        assert!(validate_interval(-1).is_err());
+        assert!(validate_interval(MAX_ROTATION_INTERVAL_SECS + 1).is_err());
+        assert!(validate_interval(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn grace_period_is_bounded() {
+        assert_eq!(normalize_grace(None).ok(), Some(0));
+        assert_eq!(normalize_grace(Some(0)).ok(), Some(0));
+        assert_eq!(
+            normalize_grace(Some(MAX_GRACE_SECS)).ok(),
+            Some(MAX_GRACE_SECS)
+        );
+        assert!(normalize_grace(Some(-1)).is_err());
+        assert!(normalize_grace(Some(MAX_GRACE_SECS + 1)).is_err());
+        assert!(normalize_grace(Some(i64::MAX)).is_err());
+    }
+
+    #[test]
+    fn accepted_bounds_cannot_overflow_a_timestamp() {
+        let now = i64::MAX / 2;
+        assert!(next_rotation_unix(now, MAX_ROTATION_INTERVAL_SECS) > now);
+        assert!(grace_expiry_unix(now, MAX_GRACE_SECS) > now);
+        assert_eq!(next_version(i32::MAX), None);
+        assert_eq!(next_version(1), Some(2));
     }
 
     #[test]

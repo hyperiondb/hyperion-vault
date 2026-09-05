@@ -8,10 +8,16 @@
 | Key management | AWS KMS | Master key never leaves KMS; DEKs are per-version and zeroized after use. |
 | Read authorization | API | IPv4/CIDR allowlist, fail-closed. |
 | Management authorization | API | Admin bearer tokens (SHA-256 fingerprints, constant-time check) + RBAC. |
+| Lockout separation | API | A wrong value presented to `/verify` counts against that sending address and secret only, so it cannot revoke the caller's secret reads or management access. |
+| Unforgeable lockout key | API | Both lockout counters are keyed on the TCP peer address, never on `X-Forwarded-For`. |
+| Rotation ordering | API | A rotated password is committed to the vault before it is sent to the external system, so a failure never leaves a credential only the external system knows. |
 | Tamper resistance | core | AEAD authentication tag; AAD binds ciphertext to `name:version`. |
-| Replication integrity | raft | Writes are committed via Raft consensus to a quorum before they are acknowledged. |
-| Auditing | API | Per-node `audit_log` records actor, client IP, action, outcome. |
+| Peer authentication | raft | Optional shared credential on every node-to-node request, plus an optional source-address check. Both off by default; see Transport security. |
+| Replication integrity | raft | Writes are committed via Raft consensus to a quorum before they are acknowledged. `POST /v1/restore` is replicated the same way, as a single log entry. |
+| Storage key integrity | store | Secret names and version numbers are validated on every write path — create, restore and snapshot install — so one secret's version rows can never fall inside another's scan range. |
+| Auditing | API | Per-node `audit_log` records actor, client IP, action, outcome. Each append takes the next key above the highest plausible one, so a tampered row cannot stop the log from growing. |
 | Memory hygiene | core | `Zeroizing` for DEKs and master keys. |
+| Rotation targets | API | A `pg_replica` target may only reach hosts listed in `VAULT_PG_TARGET_HOSTS`, and its `login_secret` must be covered by the creating token's role. |
 | KMS-outage resilience | API | In-memory unwrapped-DEK cache (`VAULT_DEK_CACHE_TTL_SECS`); plaintext is never cached. |
 
 ## Key management
@@ -64,11 +70,43 @@
 - **Raft RPC** between nodes is plain HTTP on the internal Raft port. Run the
   cluster on a private network; the WireGuard overlay
   ([`WIREGUARD.md`](WIREGUARD.md)) is the supported way to keep both the Raft and
-  admin surfaces off the public internet.
+  admin surfaces off the public internet. Three settings harden that port, and
+  all three are off by default so that upgrading a running cluster changes
+  nothing until you act:
+
+  1. `VAULT_RAFT_BIND` — bind the port to one address instead of every
+     interface.
+  2. `VAULT_CLUSTER_TOKEN` and `VAULT_CLUSTER_AUTH_REQUIRED` — a shared
+     credential on every `/raft/*` request. Roll the token out to every node
+     first, restarting them one at a time; then set the second variable on every
+     node and restart again. Doing it in the other order refuses requests from
+     nodes that have not been rolled yet.
+  3. `VAULT_RAFT_PEER_CHECK` — accept connections only from the addresses in
+     `VAULT_PEERS`.
+
+  Without the credential, anyone who can open a connection to that port can
+  submit any state-machine command, including one that adds a working admin
+  token. Requests are also refused when the vote inside them names a node id
+  that is not a configured peer, or when an append or snapshot carries an
+  uncommitted vote.
+- **Postgres rotation targets**: a `userpass` secret may carry a `pg_replica`
+  `target`; on rotation the vault sends the `login_secret` username and password
+  to that host to run `replica.rotate_credential`. The host must be listed in
+  `VAULT_PG_TARGET_HOSTS`; when that variable is unset the node seeds the list
+  from the targets already stored in its database, so a target can never name a
+  host an operator has not already used. The token creating the secret must hold
+  a permission rule covering the `login_secret` path, and a non-admin token may
+  only name its own secret's `username` as the Postgres `role`. Without those
+  limits a token with only `create` on one path could make the vault decrypt any
+  other secret and send it to a host of its choosing. Set
+  `VAULT_PG_TARGET_TLS=verify-full` to also require a verified TLS connection;
+  the default `prefer` uses TLS only when the Postgres server offers it.
 - **API**: terminate TLS at the API or a trusted local proxy. If a proxy sets
   the client IP, enable `VAULT_TRUST_PROXY=true` **only** when the proxy is
-  trusted and strips inbound `X-Forwarded-For`; otherwise the allowlist can be
-  spoofed.
+  trusted and strips inbound `X-Forwarded-For`; otherwise the read allowlist can
+  be spoofed. The lockout counters are not affected by that header: they are
+  keyed on the address of the TCP connection, so a forged header cannot lock out
+  another client and cannot clear the sender's own failures.
 
 ## Admin token lifecycle
 

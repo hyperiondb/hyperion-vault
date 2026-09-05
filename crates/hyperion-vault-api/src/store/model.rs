@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use hyperion_vault_core::{SecretFormat, SecretKind};
 
+use super::backup::BackupData;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRecord {
     pub name: String,
@@ -169,8 +171,11 @@ pub enum Command {
     AppendAudit {
         entry: AuditEntry,
     },
+    RestoreDatabase {
+        data: Box<BackupData>,
+    },
     RecordAuthFailure {
-        ip: String,
+        key: String,
         now: i64,
         max: u32,
         window_secs: i64,

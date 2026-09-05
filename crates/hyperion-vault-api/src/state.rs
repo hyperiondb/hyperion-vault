@@ -5,6 +5,7 @@ use hyperion_vault_core::IpAllowlist;
 
 use crate::cache::DekCache;
 use crate::kms::KmsProvider;
+use crate::pg_apply::PgTargetPolicy;
 use crate::raft::Raft;
 use crate::store::VaultStore;
 
@@ -14,11 +15,13 @@ pub struct AppState {
     pub dek_cache: DekCache,
     pub allowlist: IpAllowlist,
     pub trust_proxy: bool,
+    pub pg_targets: PgTargetPolicy,
     pub node_id: u64,
     pub raft: Option<Raft>,
     pub auth_max_failures: u32,
     pub auth_lockout_secs: i64,
     pub auth_window_secs: i64,
+    pub token_touch_secs: i64,
     pub kms_rewrap_enabled: bool,
     pub kms_rewrap_max_per_sec: u32,
     pub rewrap_busy: AtomicBool,

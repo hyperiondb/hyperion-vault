@@ -8,8 +8,9 @@ use openraft::error::{ClientWriteError, RaftError};
 use openraft::{BasicNode, Config};
 
 use super::network::NetworkFactory;
+use super::peer::PeerAuth;
 use super::store::{LogStore, StateMachine};
-use super::types::{ApplyResult, NodeId, Raft};
+use super::types::{ApplyResult, NodeId, Raft, MAX_PAYLOAD_ENTRIES, SNAPSHOT_MAX_CHUNK_SIZE};
 use crate::store::engine::RedbStore;
 use crate::store::{
     BackupData, Command, KmsRewrapState, LockoutRecord, RoleRecord, SecretRecord, StoreError,
@@ -22,6 +23,7 @@ pub struct RaftNode {
     peers: BTreeMap<NodeId, BasicNode>,
     node_id: NodeId,
     http: reqwest::Client,
+    auth: Arc<PeerAuth>,
 }
 
 impl RaftNode {
@@ -29,18 +31,20 @@ impl RaftNode {
         store: Arc<RedbStore>,
         node_id: NodeId,
         peers: BTreeMap<NodeId, String>,
+        auth: Arc<PeerAuth>,
     ) -> Result<Arc<Self>> {
         let config = Config {
             heartbeat_interval: 500,
             election_timeout_min: 1500,
             election_timeout_max: 3000,
+            max_payload_entries: MAX_PAYLOAD_ENTRIES,
+            snapshot_max_chunk_size: SNAPSHOT_MAX_CHUNK_SIZE,
             ..Default::default()
         };
         let config = Arc::new(config.validate().context("invalid raft config")?);
 
         let db = store.database();
         super::store::init_raft_tables(&db).context("init raft tables")?;
-        super::store::normalize_raft_log(&db).context("normalize raft log")?;
 
         let basic_peers: BTreeMap<NodeId, BasicNode> = peers
             .iter()
@@ -48,16 +52,30 @@ impl RaftNode {
             .collect();
         let http = reqwest::Client::new();
 
-        let raft = match Self::build_raft(&store, node_id, config.clone()).await {
+        if let Err(err) = super::store::normalize_raft_log(&db) {
+            if peers.len() > 1 && any_peer_initialized(&http, &auth, &basic_peers, node_id).await {
+                tracing::warn!(
+                    error = %err,
+                    "local raft metadata is unreadable; discarding it and rejoining the existing cluster from a clean slate"
+                );
+                super::store::reset_raft_state(&db).context("reset raft state")?;
+            } else {
+                return Err(err.context("normalize raft log"));
+            }
+        }
+
+        let raft = match Self::build_raft(&store, node_id, config.clone(), auth.clone()).await {
             Ok(raft) => raft,
             Err(err) => {
-                if peers.len() > 1 && any_peer_initialized(&http, &basic_peers, node_id).await {
+                if peers.len() > 1
+                    && any_peer_initialized(&http, &auth, &basic_peers, node_id).await
+                {
                     tracing::warn!(
                         error = %err,
                         "local raft state is unreadable; discarding it and rejoining the existing cluster from a clean slate"
                     );
                     super::store::reset_raft_state(&db).context("reset raft state")?;
-                    Self::build_raft(&store, node_id, config.clone())
+                    Self::build_raft(&store, node_id, config.clone(), auth.clone())
                         .await
                         .context("failed to construct raft node after reset")?
                 } else {
@@ -72,6 +90,7 @@ impl RaftNode {
             peers: basic_peers,
             node_id,
             http,
+            auth,
         }))
     }
 
@@ -79,10 +98,11 @@ impl RaftNode {
         store: &Arc<RedbStore>,
         node_id: NodeId,
         config: Arc<Config>,
+        auth: Arc<PeerAuth>,
     ) -> Result<Raft> {
         let log_store = LogStore::new(store.database());
         let state_machine = StateMachine::new(store.clone());
-        let network = NetworkFactory::new();
+        let network = NetworkFactory::new(auth);
         Raft::new(node_id, config, network, log_store, state_machine)
             .await
             .map_err(|e| anyhow!("construct raft node: {e}"))
@@ -136,7 +156,7 @@ impl RaftNode {
         for attempt in 1..=10u32 {
             let mut reached_any = false;
             for (id, addr) in &others {
-                match probe_peer_initialized(&self.http, addr).await {
+                match probe_peer_initialized(&self.http, &self.auth, addr).await {
                     Some(true) => {
                         tracing::info!(peer = *id, %addr, "peer reports an existing cluster");
                         return true;
@@ -178,10 +198,11 @@ impl RaftNode {
 
     async fn forward(&self, addr: &str, command: &Command) -> StoreResult<()> {
         let url = format!("http://{addr}/raft/apply");
-        let response = self
-            .http
-            .post(&url)
-            .json(command)
+        let mut request = self.http.post(&url).json(command);
+        if let Some(header) = self.auth.header() {
+            request = request.header(reqwest::header::AUTHORIZATION, header);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| StoreError::Internal(anyhow!(e)))?;
@@ -201,9 +222,17 @@ impl RaftNode {
     }
 }
 
-async fn probe_peer_initialized(http: &reqwest::Client, addr: &str) -> Option<bool> {
+async fn probe_peer_initialized(
+    http: &reqwest::Client,
+    auth: &PeerAuth,
+    addr: &str,
+) -> Option<bool> {
     let url = format!("http://{addr}/raft/initialized");
-    match http.get(&url).timeout(Duration::from_secs(2)).send().await {
+    let mut request = http.get(&url).timeout(Duration::from_secs(2));
+    if let Some(header) = auth.header() {
+        request = request.header(reqwest::header::AUTHORIZATION, header);
+    }
+    match request.send().await {
         Ok(resp) if resp.status().is_success() => resp.json::<bool>().await.ok(),
         _ => None,
     }
@@ -211,11 +240,12 @@ async fn probe_peer_initialized(http: &reqwest::Client, addr: &str) -> Option<bo
 
 async fn any_peer_initialized(
     http: &reqwest::Client,
+    auth: &PeerAuth,
     peers: &BTreeMap<NodeId, BasicNode>,
     self_id: NodeId,
 ) -> bool {
     for (id, node) in peers.iter().filter(|(id, _)| **id != self_id) {
-        if probe_peer_initialized(http, &node.addr).await == Some(true) {
+        if probe_peer_initialized(http, auth, &node.addr).await == Some(true) {
             tracing::info!(peer = *id, addr = %node.addr, "peer reports an existing cluster; safe to rebuild from it");
             return true;
         }
@@ -298,6 +328,10 @@ impl VaultWriter for RaftStore {
         }
     }
     async fn restore(&self, data: BackupData) -> StoreResult<()> {
-        self.node.store.restore(data).await
+        self.node
+            .write(Command::RestoreDatabase {
+                data: Box::new(data),
+            })
+            .await
     }
 }

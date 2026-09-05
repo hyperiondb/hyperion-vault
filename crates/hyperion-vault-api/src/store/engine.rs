@@ -25,6 +25,8 @@ pub const KMS_REWRAP: TableDefinition<&str, &[u8]> = TableDefinition::new("kms_r
 
 pub const KMS_REWRAP_STATE_KEY: &str = "state";
 
+pub const MAX_AUDIT_KEY: u64 = 1 << 52;
+
 pub fn version_key(name: &str, version: i32) -> String {
     format!("{name}\u{0}{version:010}")
 }
@@ -35,6 +37,21 @@ pub fn version_lower(name: &str) -> String {
 
 pub fn version_upper(name: &str) -> String {
     format!("{name}\u{1}")
+}
+
+pub const VERSION_FIELD_WIDTH: usize = 10;
+
+pub fn split_version_key(key: &str) -> Option<(&str, i32)> {
+    let (name, rest) = key.split_once('\u{0}')?;
+    if rest.len() != VERSION_FIELD_WIDTH || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((name, rest.parse().ok()?))
+}
+
+pub fn version_from_key(name: &str, key: &str) -> Option<i32> {
+    let (parsed, version) = split_version_key(key)?;
+    (parsed == name).then_some(version)
 }
 
 pub struct RedbStore {
@@ -176,7 +193,10 @@ impl VaultReader for RedbStore {
             let upper = version_upper(&name);
             let mut out = Vec::new();
             for item in versions.range(lower.as_str()..upper.as_str())? {
-                let (_key, value) = item?;
+                let (key, value) = item?;
+                if version_from_key(&name, key.value()).is_none() {
+                    continue;
+                }
                 let record: VersionRecord = decode(value.value())?;
                 if record.expires_at.is_none_or(|expiry| now < expiry) {
                     out.push(record);
@@ -335,5 +355,35 @@ impl VaultWriter for RedbStore {
     async fn restore(&self, data: super::backup::BackupData) -> StoreResult<()> {
         let db = self.db.clone();
         blocking(move || super::backup::restore_database(&db, &data)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_key_parses_back_to_its_secret_and_version() {
+        let key = version_key("db/password", 7);
+        assert_eq!(split_version_key(&key), Some(("db/password", 7)));
+        assert_eq!(version_from_key("db/password", &key), Some(7));
+    }
+
+    #[test]
+    fn another_secrets_row_is_not_accepted_even_inside_the_byte_range() {
+        let intruder = version_key("x\u{0}y", 1);
+        assert!(
+            intruder.as_str() >= version_lower("x").as_str()
+                && intruder.as_str() < version_upper("x").as_str(),
+            "precondition: the row sorts inside the scan range of secret 'x'"
+        );
+        assert_eq!(version_from_key("x", &intruder), None);
+    }
+
+    #[test]
+    fn a_negative_version_field_is_not_accepted() {
+        let key = version_key("n", -1);
+        assert_eq!(version_from_key("n", &key), None);
+        assert_eq!(split_version_key(&key), None);
     }
 }

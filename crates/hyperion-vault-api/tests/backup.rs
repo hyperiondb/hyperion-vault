@@ -50,6 +50,10 @@ fn sample_secret(name: &str, ciphertext: Vec<u8>) -> (SecretRecord, VersionRecor
     (secret, version)
 }
 
+fn test_auth() -> std::sync::Arc<hyperion_vault_api::raft::PeerAuth> {
+    std::sync::Arc::new(hyperion_vault_api::raft::PeerAuth::disabled())
+}
+
 fn peer_map(addr: &str) -> BTreeMap<u64, String> {
     let mut peers = BTreeMap::new();
     peers.insert(1, addr.to_string());
@@ -58,7 +62,7 @@ fn peer_map(addr: &str) -> BTreeMap<u64, String> {
 
 async fn start_leader(addr: &str) -> Arc<RaftNode> {
     let store = RedbStore::open(temp_db_path(), 1).expect("open redb store");
-    let node = RaftNode::start(store, 1, peer_map(addr))
+    let node = RaftNode::start(store, 1, peer_map(addr), test_auth())
         .await
         .expect("raft node must construct");
     node.bootstrap().await.expect("bootstrap");

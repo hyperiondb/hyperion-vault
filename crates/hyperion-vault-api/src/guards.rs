@@ -15,6 +15,7 @@ pub struct AdminActor {
     pub is_admin: bool,
     pub rules: Vec<(String, String)>,
     pub client_ip: Option<IpAddr>,
+    pub peer_ip: Option<IpAddr>,
 }
 
 impl FromRequestParts<SharedState> for AdminActor {
@@ -25,12 +26,13 @@ impl FromRequestParts<SharedState> for AdminActor {
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
         let ip = client_ip(parts, state.trust_proxy);
-        lockout::check(state, ip).await?;
+        let peer = peer_ip(parts);
+        lockout::check(state, peer).await?;
 
         let token = match bearer_token(parts) {
             Some(token) => token,
             None => {
-                lockout::record(state, ip).await;
+                lockout::record(state, peer).await;
                 return Err(ApiError::Unauthorized);
             }
         };
@@ -43,7 +45,7 @@ impl FromRequestParts<SharedState> for AdminActor {
         let token_record = match record {
             Some(record) if record.revoked_at.is_none() => record,
             _ => {
-                lockout::record(state, ip).await;
+                lockout::record(state, peer).await;
                 return Err(ApiError::Unauthorized);
             }
         };
@@ -56,25 +58,36 @@ impl FromRequestParts<SharedState> for AdminActor {
             None => (false, Vec::new()),
         };
 
-        let _ = state
-            .store
-            .apply(Command::TouchToken {
-                fingerprint,
-                at: now_unix(),
-            })
-            .await;
+        // On a cluster this is a replicated write, so it is written at most
+        // once per token per VAULT_TOKEN_TOUCH_SECS instead of once per request.
+        let now = now_unix();
+        let due = match token_record.last_used_at {
+            None => true,
+            Some(at) => now.saturating_sub(at) >= state.token_touch_secs,
+        };
+        if due {
+            let _ = state
+                .store
+                .apply(Command::TouchToken {
+                    fingerprint,
+                    at: now,
+                })
+                .await;
+        }
 
         Ok(AdminActor {
             name: token_record.name,
             is_admin,
             rules,
             client_ip: ip,
+            peer_ip: peer,
         })
     }
 }
 
 pub struct ReaderGuard {
     pub client_ip: Ipv4Addr,
+    pub peer_ip: IpAddr,
 }
 
 impl FromRequestParts<SharedState> for ReaderGuard {
@@ -84,13 +97,17 @@ impl FromRequestParts<SharedState> for ReaderGuard {
         parts: &mut Parts,
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
+        let peer = peer_ip(parts).ok_or(ApiError::Forbidden)?;
         let ip = client_ip(parts, state.trust_proxy).ok_or(ApiError::Forbidden)?;
-        lockout::check_ip(state, ip).await?;
+        lockout::check_ip(state, peer).await?;
         match ip {
-            IpAddr::V4(v4) if state.allowlist.contains(v4) => Ok(ReaderGuard { client_ip: v4 }),
+            IpAddr::V4(v4) if state.allowlist.contains(v4) => Ok(ReaderGuard {
+                client_ip: v4,
+                peer_ip: peer,
+            }),
             _ => {
-                tracing::warn!(client_ip = %ip, "read denied: client IP not in VAULT_ALLOWED_IPS");
-                lockout::record(state, Some(ip)).await;
+                tracing::warn!(client_ip = %ip, peer_ip = %peer, "read denied: client IP not in VAULT_ALLOWED_IPS");
+                lockout::record(state, Some(peer)).await;
                 Err(ApiError::Forbidden)
             }
         }
@@ -110,6 +127,17 @@ pub fn bearer_token(parts: &Parts) -> Option<String> {
     }
 }
 
+// The address of the TCP connection itself. A client cannot forge it, so it is
+// what every lockout counter is keyed on, while `client_ip` below is the address
+// the request claims to come from and is what the read allowlist and the audit
+// log use.
+pub fn peer_ip(parts: &Parts) -> Option<IpAddr> {
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip())
+}
+
 pub fn client_ip(parts: &Parts, trust_proxy: bool) -> Option<IpAddr> {
     if trust_proxy {
         if let Some(value) = parts
@@ -125,8 +153,5 @@ pub fn client_ip(parts: &Parts, trust_proxy: bool) -> Option<IpAddr> {
         }
     }
 
-    parts
-        .extensions
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip())
+    peer_ip(parts)
 }

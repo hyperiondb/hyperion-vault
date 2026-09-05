@@ -2,7 +2,12 @@ use anyhow::{bail, Context, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use super::engine::{AUDIT, KMS_REWRAP, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS};
+use hyperion_vault_core::{is_valid_secret_name, is_valid_secret_version};
+
+use super::engine::{
+    split_version_key, AUDIT, KMS_REWRAP, MAX_AUDIT_KEY, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME,
+    VERSIONS,
+};
 
 pub const BACKUP_VERSION: u32 = 1;
 
@@ -36,23 +41,50 @@ pub fn dump_database(db: &Database) -> Result<BackupData> {
 }
 
 pub fn restore_database(db: &Database, data: &BackupData) -> Result<()> {
+    let wtx = db.begin_write().context("open write txn for restore")?;
+    restore_tables(&wtx, data)?;
+    wtx.commit().context("commit restore")?;
+    Ok(())
+}
+
+// Shared by the single-node path above and by the replicated `RestoreDatabase`
+// command, so both validate the same way and write the same rows.
+pub fn restore_tables(wtx: &redb::WriteTransaction, data: &BackupData) -> Result<()> {
     if data.version != BACKUP_VERSION {
         bail!(
             "unsupported backup version {} (this build restores version {BACKUP_VERSION})",
             data.version
         );
     }
-    let wtx = db.begin_write().context("open write txn for restore")?;
-    {
-        restore_str(&wtx, SECRETS, &data.secrets)?;
-        restore_str(&wtx, VERSIONS, &data.versions)?;
-        restore_str(&wtx, ROLES, &data.roles)?;
-        restore_str(&wtx, TOKENS_BY_NAME, &data.tokens_by_name)?;
-        restore_bytes(&wtx, TOKENS, &data.tokens)?;
-        restore_u64(&wtx, AUDIT, &data.audit)?;
-        restore_str(&wtx, KMS_REWRAP, &data.kms_rewrap)?;
+    check_secret_rows(data)?;
+    restore_str(wtx, SECRETS, &data.secrets)?;
+    restore_str(wtx, VERSIONS, &data.versions)?;
+    restore_str(wtx, ROLES, &data.roles)?;
+    restore_str(wtx, TOKENS_BY_NAME, &data.tokens_by_name)?;
+    restore_bytes(wtx, TOKENS, &data.tokens)?;
+    restore_u64(wtx, AUDIT, &data.audit)?;
+    restore_str(wtx, KMS_REWRAP, &data.kms_rewrap)?;
+    Ok(())
+}
+
+fn check_secret_rows(data: &BackupData) -> Result<()> {
+    for (name, _) in &data.secrets {
+        if !is_valid_secret_name(name) {
+            bail!("backup holds an invalid secret name {name:?}");
+        }
     }
-    wtx.commit().context("commit restore")?;
+    for (key, _) in &data.versions {
+        match split_version_key(key) {
+            Some((name, version))
+                if is_valid_secret_name(name) && is_valid_secret_version(version) => {}
+            _ => bail!("backup holds an invalid secret-version key {key:?}"),
+        }
+    }
+    for (key, _) in &data.audit {
+        if *key > MAX_AUDIT_KEY {
+            bail!("backup holds an audit key {key} above the maximum {MAX_AUDIT_KEY}");
+        }
+    }
     Ok(())
 }
 

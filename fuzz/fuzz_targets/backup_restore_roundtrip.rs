@@ -9,8 +9,10 @@ mod imp {
         dump_database, restore_database, BackupData, BACKUP_VERSION,
     };
     use hyperion_vault_api::store::engine::{
-        AUDIT, KMS_REWRAP, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS,
+        split_version_key, AUDIT, KMS_REWRAP, MAX_AUDIT_KEY, ROLES, SECRETS, TOKENS,
+        TOKENS_BY_NAME, VERSIONS,
     };
+    use hyperion_vault_core::{is_valid_secret_name, is_valid_secret_version};
     use redb::Database;
 
     #[derive(Arbitrary, Debug)]
@@ -87,19 +89,32 @@ mod imp {
             && a.kms_rewrap == b.kms_rewrap
     }
 
-    // `POST /v1/restore` hands these rows straight to redb with no per-row
-    // validation, so restore must be total, must reject a foreign backup
-    // version without touching the store, and must be exactly reversible.
+    // Every row a restore writes must be one the write paths would accept, so a
+    // backup carrying a name outside the character set, a version key that does
+    // not belong to a secret in it, or an audit key above the plausible range is
+    // refused. An accepted restore must be exactly reversible.
+    fn rows_are_acceptable(data: &BackupData) -> bool {
+        data.secrets
+            .iter()
+            .all(|(name, _)| is_valid_secret_name(name))
+            && data.versions.iter().all(|(key, _)| {
+                split_version_key(key).is_some_and(|(name, version)| {
+                    is_valid_secret_name(name) && is_valid_secret_version(version)
+                })
+            })
+            && data.audit.iter().all(|(key, _)| *key <= MAX_AUDIT_KEY)
+    }
+
     pub fn run(input: Input) {
         let db = memory_db();
         init(&db);
         let data = to_backup(&input);
 
-        if input.version != BACKUP_VERSION {
+        if input.version != BACKUP_VERSION || !rows_are_acceptable(&data) {
             let before = dump_database(&db).expect("dump before rejected restore");
             assert!(
                 restore_database(&db, &data).is_err(),
-                "a foreign backup version must be rejected"
+                "a foreign backup version or an unacceptable row must be rejected"
             );
             let after = dump_database(&db).expect("dump after rejected restore");
             assert!(

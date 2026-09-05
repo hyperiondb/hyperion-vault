@@ -79,19 +79,32 @@ pub async fn build_state(cfg: &Config) -> anyhow::Result<SharedState> {
         }
     }
 
+    let pg_targets = build_pg_target_policy(cfg, &redb).await?;
+
     let store: Arc<dyn VaultStore>;
     let raft: Option<crate::raft::Raft>;
 
     if cfg.peers.len() > 1 {
-        let node = RaftNode::start(redb.clone(), cfg.node_id, cfg.peers.clone())
+        let auth = Arc::new(
+            raft::PeerAuth::new(cfg.cluster_token.clone(), cfg.cluster_auth_required)
+                .context("VAULT_CLUSTER_TOKEN / VAULT_CLUSTER_AUTH_REQUIRED are invalid")?,
+        );
+        let peers = raft::PeerAddrs::new(cfg.raft_peer_check, &cfg.peers).await;
+        log_peer_guard(&auth, &peers).await;
+
+        let node = RaftNode::start(redb.clone(), cfg.node_id, cfg.peers.clone(), auth.clone())
             .await
             .context("failed to start raft node")?;
 
         let handle = node.raft.clone();
         let raft_listen = raft_listen_addr(cfg)?;
-        let server_handle = handle.clone();
+        let server_state = raft::server::ServerState {
+            raft: handle.clone(),
+            auth,
+            peers,
+        };
         tokio::spawn(async move {
-            if let Err(err) = raft::server::serve(server_handle, raft_listen).await {
+            if let Err(err) = raft::server::serve(server_state, raft_listen).await {
                 tracing::error!(error = %err, "raft RPC server stopped");
             }
         });
@@ -137,15 +150,104 @@ pub async fn build_state(cfg: &Config) -> anyhow::Result<SharedState> {
         dek_cache,
         allowlist,
         trust_proxy: cfg.trust_proxy,
+        pg_targets,
         node_id: cfg.node_id,
         raft,
         auth_max_failures: cfg.auth_max_failures,
         auth_lockout_secs: cfg.auth_lockout_secs,
         auth_window_secs: cfg.auth_window_secs,
+        token_touch_secs: cfg.token_touch_secs,
         kms_rewrap_enabled: cfg.kms_rewrap_enabled,
         kms_rewrap_max_per_sec: cfg.kms_rewrap_max_per_sec,
         rewrap_busy: std::sync::atomic::AtomicBool::new(false),
     }))
+}
+
+async fn build_pg_target_policy(
+    cfg: &Config,
+    redb: &Arc<RedbStore>,
+) -> anyhow::Result<pg_apply::PgTargetPolicy> {
+    let ca_file = cfg.pg_target_ca_file.as_deref();
+
+    if !cfg.pg_target_hosts.trim().is_empty() {
+        let policy =
+            pg_apply::PgTargetPolicy::build(&cfg.pg_target_hosts, cfg.pg_target_tls, ca_file)
+                .context(
+                "VAULT_PG_TARGET_HOSTS / VAULT_PG_TARGET_TLS / VAULT_PG_TARGET_CA_FILE are invalid",
+            )?;
+        log_pg_target_policy(&policy, false);
+        return Ok(policy);
+    }
+
+    let stored: Vec<String> = redb
+        .list_secrets()
+        .await?
+        .into_iter()
+        .filter_map(|secret| secret.target)
+        .flat_map(|target| match target {
+            crate::store::RotationTarget::PgReplica(pg) => pg.hosts,
+        })
+        .collect();
+
+    let policy = pg_apply::PgTargetPolicy::seeded(stored, cfg.pg_target_tls, ca_file)
+        .context("VAULT_PG_TARGET_TLS / VAULT_PG_TARGET_CA_FILE are invalid")?;
+    log_pg_target_policy(&policy, true);
+    Ok(policy)
+}
+
+fn log_pg_target_policy(policy: &pg_apply::PgTargetPolicy, seeded: bool) {
+    if policy.is_empty() {
+        tracing::info!(
+            "VAULT_PG_TARGET_HOSTS is empty and no stored secret carries a pg_replica target: such targets are refused"
+        );
+        return;
+    }
+
+    if seeded {
+        tracing::warn!(
+            hosts = ?policy.hosts(),
+            "VAULT_PG_TARGET_HOSTS is not set: allowing only the Postgres hosts already used by stored rotation targets; set VAULT_PG_TARGET_HOSTS explicitly"
+        );
+    } else {
+        tracing::info!(hosts = ?policy.hosts(), "pg_replica rotation target allowlist loaded");
+    }
+
+    if policy.tls_required() {
+        tracing::info!("pg_replica rotation connects with TLS and verifies the server certificate");
+    } else if policy.tls_enabled() {
+        tracing::warn!(
+            "VAULT_PG_TARGET_TLS=prefer: rotation uses TLS only when the Postgres server offers it, otherwise it sends the login credential in plaintext; set VAULT_PG_TARGET_TLS=verify-full to require TLS"
+        );
+    } else {
+        tracing::warn!(
+            "VAULT_PG_TARGET_TLS=disable: rotation sends the login credential to Postgres targets in plaintext"
+        );
+    }
+}
+
+async fn log_peer_guard(auth: &raft::PeerAuth, peers: &Arc<raft::PeerAddrs>) {
+    if auth.required() {
+        tracing::info!("raft RPC requires the cluster credential (VAULT_CLUSTER_AUTH_REQUIRED)");
+    } else if auth.configured() {
+        tracing::warn!(
+            "VAULT_CLUSTER_TOKEN is set but not required: peer requests carry it and requests without it are still accepted; set VAULT_CLUSTER_AUTH_REQUIRED=true once every node is rolled"
+        );
+    } else {
+        tracing::warn!(
+            "VAULT_CLUSTER_TOKEN is not set: the raft port accepts any request that reaches it"
+        );
+    }
+
+    if peers.enabled() {
+        tracing::info!(
+            addresses = peers.resolved_len().await,
+            "raft RPC accepts connections from configured peer addresses only"
+        );
+    } else {
+        tracing::warn!(
+            "VAULT_RAFT_PEER_CHECK is off: the raft port accepts connections from any source address"
+        );
+    }
 }
 
 fn raft_listen_addr(cfg: &Config) -> anyhow::Result<SocketAddr> {
@@ -157,9 +259,10 @@ fn raft_listen_addr(cfg: &Config) -> anyhow::Result<SocketAddr> {
         .next()
         .and_then(|port| port.parse().ok())
         .ok_or_else(|| anyhow::anyhow!("VAULT_PEERS address '{addr}' must be host:port"))?;
-    format!("0.0.0.0:{port}")
+    let bind = cfg.raft_bind.trim();
+    format!("{bind}:{port}")
         .parse()
-        .map_err(|_| anyhow::anyhow!("invalid raft listen port {port}"))
+        .map_err(|_| anyhow::anyhow!("VAULT_RAFT_BIND '{bind}' with port {port} is not an address"))
 }
 
 pub async fn serve() -> anyhow::Result<()> {

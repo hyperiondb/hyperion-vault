@@ -1,5 +1,20 @@
 use std::time::Duration;
 
+pub const MAX_ROTATION_INTERVAL_SECS: i64 = 100 * 365 * 24 * 60 * 60;
+pub const MAX_GRACE_SECS: i64 = MAX_ROTATION_INTERVAL_SECS;
+
+pub fn next_rotation_unix(from_unix: i64, interval_secs: i64) -> i64 {
+    from_unix.saturating_add(interval_secs)
+}
+
+pub fn grace_expiry_unix(superseded_at_unix: i64, grace_secs: i64) -> i64 {
+    superseded_at_unix.saturating_add(grace_secs)
+}
+
+pub fn next_version(current: i32) -> Option<i32> {
+    current.checked_add(1)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RotationPolicy {
     pub interval: Duration,
@@ -12,11 +27,11 @@ impl RotationPolicy {
     }
 
     pub fn next_rotation_unix(&self, from_unix: i64) -> i64 {
-        from_unix.saturating_add(self.interval.as_secs() as i64)
+        next_rotation_unix(from_unix, self.interval.as_secs() as i64)
     }
 
     pub fn grace_expiry_unix(&self, superseded_at_unix: i64) -> i64 {
-        superseded_at_unix.saturating_add(self.grace.as_secs() as i64)
+        grace_expiry_unix(superseded_at_unix, self.grace.as_secs() as i64)
     }
 }
 

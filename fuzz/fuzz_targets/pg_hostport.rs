@@ -11,8 +11,8 @@ mod imp {
         let (host, port) = split_hostport(raw);
 
         assert!(
-            raw.starts_with(host),
-            "the host must be a prefix of the input"
+            raw.contains(host),
+            "the host must be a substring of the input"
         );
         assert!(host.len() <= raw.len(), "the host must not grow the input");
 
@@ -22,11 +22,26 @@ mod imp {
         }
 
         // A well-formed "host:port" must survive the split unchanged.
-        if let Some((expected_host, expected_port)) = raw.rsplit_once(':') {
-            if !expected_host.contains(':') {
-                if let Ok(parsed) = expected_port.parse::<u16>() {
-                    assert_eq!(host, expected_host, "host must round-trip");
-                    assert_eq!(port, parsed, "port must round-trip");
+        if !raw.starts_with('[') {
+            if let Some((expected_host, expected_port)) = raw.rsplit_once(':') {
+                if !expected_host.contains(':') {
+                    if let Ok(parsed) = expected_port.parse::<u16>() {
+                        assert_eq!(host, expected_host, "host must round-trip");
+                        assert_eq!(port, parsed, "port must round-trip");
+                    }
+                }
+            }
+        }
+
+        // A bracketed IPv6 literal loses its brackets and keeps its address.
+        if let Some(rest) = raw.strip_prefix('[') {
+            if let Some((inner, tail)) = rest.split_once(']') {
+                let well_formed = tail.is_empty()
+                    || tail
+                        .strip_prefix(':')
+                        .is_some_and(|p| p.parse::<u16>().is_ok());
+                if well_formed {
+                    assert_eq!(host, inner, "a bracketed literal keeps its address");
                 }
             }
         }

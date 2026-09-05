@@ -9,22 +9,29 @@ use openraft::BasicNode;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use std::sync::Arc;
+
+use super::peer::PeerAuth;
 use super::types::{NodeId, TypeConfig};
+
+#[derive(Debug, thiserror::Error)]
+#[error("{url} returned HTTP {status}: {detail}")]
+struct RpcStatusError {
+    url: String,
+    status: u16,
+    detail: String,
+}
 
 pub struct NetworkFactory {
     client: reqwest::Client,
-}
-
-impl Default for NetworkFactory {
-    fn default() -> Self {
-        Self::new()
-    }
+    auth: Arc<PeerAuth>,
 }
 
 impl NetworkFactory {
-    pub fn new() -> Self {
+    pub fn new(auth: Arc<PeerAuth>) -> Self {
         Self {
             client: reqwest::Client::new(),
+            auth,
         }
     }
 }
@@ -35,6 +42,7 @@ impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
     async fn new_client(&mut self, target: NodeId, node: &BasicNode) -> Self::Network {
         NetworkConnection {
             client: self.client.clone(),
+            auth: self.auth.clone(),
             target,
             addr: node.addr.clone(),
         }
@@ -43,6 +51,7 @@ impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
 
 pub struct NetworkConnection {
     client: reqwest::Client,
+    auth: Arc<PeerAuth>,
     target: NodeId,
     addr: String,
 }
@@ -59,17 +68,34 @@ impl NetworkConnection {
         E: std::error::Error + DeserializeOwned,
     {
         let url = format!("http://{}/{}", self.addr, path);
-        let response = self
-            .client
-            .post(&url)
-            .json(&req)
+        let mut request = self.client.post(&url).json(&req);
+        if let Some(header) = self.auth.header() {
+            request = request.header(reqwest::header::AUTHORIZATION, header);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let status = response.status();
         let bytes = response
             .bytes()
             .await
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        if !status.is_success() {
+            let detail: String = String::from_utf8_lossy(&bytes).chars().take(256).collect();
+            let err = RpcStatusError {
+                url,
+                status: status.as_u16(),
+                detail,
+            };
+            tracing::warn!(
+                target_node = self.target,
+                error = %err,
+                body_bytes = bytes.len(),
+                "raft RPC rejected by peer"
+            );
+            return Err(RPCError::Network(NetworkError::new(&err)));
+        }
         let result: Result<Resp, RaftError<NodeId, E>> =
             serde_json::from_slice(&bytes).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         result.map_err(|e| RPCError::RemoteError(RemoteError::new(self.target, e)))

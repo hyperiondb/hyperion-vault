@@ -64,6 +64,13 @@ binaries are built but the integration is not yet active.
 - `VAULT_ALLOWED_IPS` includes the ciqadamq nodes and `server-backend` (so reads
   are permitted), and the vault can reach the Postgres nodes on `:5432` (so it
   can run `ALTER ROLE`).
+- `VAULT_PG_TARGET_HOSTS` lists those same Postgres endpoints as `host:port`.
+  A `pg_replica` target whose `hosts` are not all listed is refused. If the
+  variable is unset, the node seeds the list from the targets already in its
+  database, so an existing deployment keeps working after an upgrade; set it
+  explicitly when adding a new Postgres endpoint. The connection defaults to
+  `VAULT_PG_TARGET_TLS=prefer` (TLS only if the server offers it); set
+  `verify-full` where Postgres has a certificate the vault can verify.
 - The pg_replica extension build that includes `replica.rotate_credential` is
   deployed (it is a `shared_preload_libraries` extension, so this needs a
   Postgres restart).
@@ -129,6 +136,7 @@ at boot — provision first.
 | server-backend | `SERVER_PRIVATE_IP`, `VAULT_BOOTSTRAP_TOKEN` | vault address + token for create/rotate |
 | server-backend | `PG_USER`, `PG_DB`, `PG_PASS` | DB identity; `PG_PASS` also feeds `DATABASE_URL` and is the fallback |
 | secret `target` | `hosts`, `database`, `role`, `login_secret` | how the vault reaches the pg cluster to apply a rotation |
+| vault | `VAULT_PG_TARGET_HOSTS`, `VAULT_PG_TARGET_TLS` | which Postgres endpoints a `target` may use, and whether that connection is TLS |
 
 Default rotation cadence (provisioning): interval 30 days, grace 1 day.
 

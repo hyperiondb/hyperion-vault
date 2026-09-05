@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::types::{ApplyResult, NodeId, TypeConfig};
 use crate::store::apply::apply_command;
 use crate::store::engine::{
-    RedbStore, KMS_REWRAP, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS,
+    split_version_key, RedbStore, KMS_REWRAP, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS,
 };
 
 const LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("raft_log");
@@ -26,6 +26,8 @@ const META_PURGED: &str = "last_purged";
 const META_APPLIED: &str = "last_applied";
 const META_MEMBERSHIP: &str = "membership";
 const META_SNAPSHOT: &str = "snapshot";
+
+pub const MAX_PLAUSIBLE_LOG_INDEX: u64 = 1 << 52;
 
 pub fn init_raft_tables(db: &Database) -> anyhow::Result<()> {
     let wtx = db.begin_write()?;
@@ -44,7 +46,7 @@ pub fn normalize_raft_log(db: &Database) -> anyhow::Result<()> {
     let floor = applied
         .map(|log_id| log_id.index)
         .or_else(|| purged.map(|log_id| log_id.index));
-    let start = floor.map(|index| index + 1).unwrap_or(0);
+    let start = floor.map(|index| index.saturating_add(1)).unwrap_or(0);
 
     let to_delete: Vec<u64>;
     {
@@ -142,6 +144,10 @@ fn write_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> StorageError
     StorageIOError::write(AnyError::new(&e)).into()
 }
 
+fn is_json_null(bytes: &[u8]) -> bool {
+    bytes.trim_ascii() == b"null"
+}
+
 fn read_meta<T: for<'de> Deserialize<'de>>(
     db: &Database,
     key: &str,
@@ -149,6 +155,13 @@ fn read_meta<T: for<'de> Deserialize<'de>>(
     let rtx = db.begin_read().map_err(read_err)?;
     let table = rtx.open_table(META).map_err(read_err)?;
     match table.get(key).map_err(read_err)? {
+        Some(value) if is_json_null(value.value()) => {
+            tracing::warn!(
+                key,
+                "raft metadata holds a JSON null (written by an older build); reading it as absent"
+            );
+            Ok(None)
+        }
         Some(value) => Ok(Some(
             serde_json::from_slice(value.value()).map_err(read_err)?,
         )),
@@ -219,7 +232,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         }
 
         let last_purged = match (stored_purged, first_index) {
-            (sp, Some(first)) if sp.map(|p| p.index + 1).unwrap_or(0) < first => {
+            (sp, Some(first)) if sp.map(|p| p.index.saturating_add(1)).unwrap_or(0) < first => {
                 let applied: Option<LogId<NodeId>> = read_meta(&self.db, META_APPLIED)?;
                 applied.or(stored_purged)
             }
@@ -481,6 +494,8 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     ) -> Result<(), StorageError<NodeId>> {
         let data: SnapshotData =
             serde_json::from_slice(snapshot.get_ref().as_slice()).map_err(read_err)?;
+        check_snapshot_meta(meta)?;
+        check_snapshot_rows(&data)?;
         let db = self.db();
         let wtx = db.begin_write().map_err(write_err)?;
         {
@@ -499,20 +514,24 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         }
         {
             let mut table = wtx.open_table(META).map_err(write_err)?;
-            let lbytes = serde_json::to_vec(&meta.last_log_id).map_err(write_err)?;
-            table
-                .insert(META_APPLIED, lbytes.as_slice())
-                .map_err(write_err)?;
+            match &meta.last_log_id {
+                Some(last) => {
+                    let lbytes = serde_json::to_vec(last).map_err(write_err)?;
+                    table
+                        .insert(META_APPLIED, lbytes.as_slice())
+                        .map_err(write_err)?;
+                    table
+                        .insert(META_PURGED, lbytes.as_slice())
+                        .map_err(write_err)?;
+                }
+                None => {
+                    table.remove(META_APPLIED).map_err(write_err)?;
+                }
+            }
             let mbytes = serde_json::to_vec(&meta.last_membership).map_err(write_err)?;
             table
                 .insert(META_MEMBERSHIP, mbytes.as_slice())
                 .map_err(write_err)?;
-            if let Some(last) = &meta.last_log_id {
-                let pbytes = serde_json::to_vec(last).map_err(write_err)?;
-                table
-                    .insert(META_PURGED, pbytes.as_slice())
-                    .map_err(write_err)?;
-            }
         }
         if let Some(last) = &meta.last_log_id {
             let mut log = wtx.open_table(LOG).map_err(write_err)?;
@@ -553,6 +572,45 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
             snapshot: Box::new(Cursor::new(bytes)),
         }))
     }
+}
+
+fn reject(message: String) -> StorageError<NodeId> {
+    let io = std::io::Error::other(message);
+    StorageIOError::write(AnyError::new(&io)).into()
+}
+
+fn check_snapshot_meta(
+    meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
+) -> Result<(), StorageError<NodeId>> {
+    match &meta.last_log_id {
+        Some(last) if last.index > MAX_PLAUSIBLE_LOG_INDEX => Err(reject(format!(
+            "snapshot last_log_id index {} is above the plausible maximum {MAX_PLAUSIBLE_LOG_INDEX}",
+            last.index
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn check_snapshot_rows(data: &SnapshotData) -> Result<(), StorageError<NodeId>> {
+    for (name, _) in &data.secrets {
+        if !hyperion_vault_core::is_valid_secret_name(name) {
+            return Err(reject(format!(
+                "snapshot holds an invalid secret name {name:?}"
+            )));
+        }
+    }
+    for (key, _) in &data.versions {
+        let valid = split_version_key(key).is_some_and(|(name, version)| {
+            hyperion_vault_core::is_valid_secret_name(name)
+                && hyperion_vault_core::is_valid_secret_version(version)
+        });
+        if !valid {
+            return Err(reject(format!(
+                "snapshot holds an invalid secret-version key {key:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn dump_str_table(
@@ -615,12 +673,25 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn tmp_db() -> Database {
+    fn tmp_db_path() -> std::path::PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
         path.push(format!("hv-store-test-{}-{}.redb", std::process::id(), n));
         let _ = std::fs::remove_file(&path);
-        Database::create(path).expect("create db")
+        path
+    }
+
+    fn tmp_db() -> Database {
+        Database::create(tmp_db_path()).expect("create db")
+    }
+
+    fn write_raw_meta(db: &Database, key: &str, bytes: &[u8]) {
+        let wtx = db.begin_write().unwrap();
+        {
+            let mut table = wtx.open_table(META).unwrap();
+            table.insert(key, bytes).unwrap();
+        }
+        wtx.commit().unwrap();
     }
 
     fn log_id(term: u64, node: u64, index: u64) -> LogId<NodeId> {
@@ -738,6 +809,126 @@ mod tests {
             vec![18011, 18012],
             "a contiguous tail above last_applied must be preserved"
         );
+    }
+
+    #[test]
+    fn stored_json_null_reads_as_absent() {
+        let db = tmp_db();
+        init_raft_tables(&db).unwrap();
+        write_raw_meta(&db, META_APPLIED, b"null");
+
+        let applied: Option<LogId<NodeId>> = read_meta(&db, META_APPLIED)
+            .expect("a JSON null written by an older build must not fail the read");
+        assert!(applied.is_none());
+    }
+
+    #[test]
+    fn startup_normalization_survives_a_stored_json_null() {
+        let db = tmp_db();
+        init_raft_tables(&db).unwrap();
+        write_raw_meta(&db, META_APPLIED, b"null");
+
+        normalize_raft_log(&db).expect("a node must still boot with a JSON null on disk");
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_without_last_log_id_keeps_metadata_readable() {
+        let store = RedbStore::open(tmp_db_path(), 1).expect("open store");
+        let db = store.database();
+        init_raft_tables(&db).unwrap();
+
+        let mut machine = StateMachine::new(store);
+        let body = serde_json::to_vec(&SnapshotData::default()).unwrap();
+        let meta = SnapshotMeta {
+            last_log_id: None,
+            last_membership: StoredMembership::default(),
+            snapshot_id: "empty".to_string(),
+        };
+
+        machine
+            .install_snapshot(&meta, Box::new(Cursor::new(body)))
+            .await
+            .expect("install snapshot");
+
+        let applied: Option<LogId<NodeId>> =
+            read_meta(&db, META_APPLIED).expect("last_applied must remain readable");
+        assert!(applied.is_none());
+        normalize_raft_log(&db).expect("the node must still boot after this snapshot");
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_refuses_an_implausible_log_index() {
+        let store = RedbStore::open(tmp_db_path(), 1).expect("open store");
+        let db = store.database();
+        init_raft_tables(&db).unwrap();
+
+        let mut machine = StateMachine::new(store);
+        let body = serde_json::to_vec(&SnapshotData::default()).unwrap();
+        let meta = SnapshotMeta {
+            last_log_id: Some(log_id(1, 1, u64::MAX)),
+            last_membership: StoredMembership::default(),
+            snapshot_id: "huge".to_string(),
+        };
+
+        let result = machine
+            .install_snapshot(&meta, Box::new(Cursor::new(body)))
+            .await;
+        assert!(result.is_err(), "an out-of-range log index must be refused");
+
+        let applied: Option<LogId<NodeId>> = read_meta(&db, META_APPLIED).unwrap();
+        assert!(applied.is_none(), "nothing may reach the metadata table");
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_refuses_an_invalid_secret_name() {
+        let store = RedbStore::open(tmp_db_path(), 1).expect("open store");
+        let db = store.database();
+        init_raft_tables(&db).unwrap();
+
+        let mut machine = StateMachine::new(store);
+        let data = SnapshotData {
+            secrets: vec![("x\u{0}y".to_string(), vec![1, 2, 3])],
+            ..SnapshotData::default()
+        };
+        let meta = SnapshotMeta {
+            last_log_id: Some(log_id(1, 1, 5)),
+            last_membership: StoredMembership::default(),
+            snapshot_id: "1-5".to_string(),
+        };
+
+        let result = machine
+            .install_snapshot(
+                &meta,
+                Box::new(Cursor::new(serde_json::to_vec(&data).unwrap())),
+            )
+            .await;
+        assert!(result.is_err(), "an invalid secret name must be refused");
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_with_last_log_id_records_it() {
+        let store = RedbStore::open(tmp_db_path(), 1).expect("open store");
+        let db = store.database();
+        init_raft_tables(&db).unwrap();
+
+        let mut machine = StateMachine::new(store);
+        let body = serde_json::to_vec(&SnapshotData::default()).unwrap();
+        let last = log_id(7, 1, 42);
+        let meta = SnapshotMeta {
+            last_log_id: Some(last),
+            last_membership: StoredMembership::default(),
+            snapshot_id: "7-42".to_string(),
+        };
+
+        machine
+            .install_snapshot(&meta, Box::new(Cursor::new(body)))
+            .await
+            .expect("install snapshot");
+
+        let applied: Option<LogId<NodeId>> = read_meta(&db, META_APPLIED).unwrap();
+        let purged: Option<LogId<NodeId>> = read_meta(&db, META_PURGED).unwrap();
+        assert_eq!(applied, Some(last));
+        assert_eq!(purged, Some(last));
     }
 
     #[test]

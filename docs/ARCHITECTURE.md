@@ -98,6 +98,15 @@ currently-valid versions (current + within-grace) → constant-time compare →
 - **openraft** orders all writes through the leader and replicates the log to a
   quorum before acknowledging. Leader election provides failover. The same
   `apply_command` runs on every node, so all redb stores converge.
+- Raft RPC bodies are JSON, and a byte array costs about four JSON bytes per
+  raw byte. The Raft port therefore accepts bodies up to 16 MiB
+  (`RPC_BODY_LIMIT` in `raft/types.rs`), and the sender is bounded to match:
+  at most 16 log entries per append (`MAX_PAYLOAD_ENTRIES`) and 256 KiB per
+  snapshot chunk (`SNAPSHOT_MAX_CHUNK_SIZE`). A snapshot chunk stays under
+  2 MiB of JSON, which is what a node running an older build still accepts, so
+  a cluster can be upgraded one node at a time. When a peer rejects a body, the
+  sender logs the HTTP status and the peer's message instead of reporting an
+  unexplained transport failure.
 - The **rotation worker** runs on every node but acts only on the leader: it
   scans `next_rotation_at` and issues `RotateSecret` / `ExpireGraceVersions`
   commands through Raft, so rotations replicate like any other write.

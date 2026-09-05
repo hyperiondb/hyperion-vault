@@ -131,6 +131,7 @@ make fuzz BUDGET=60      # sweep all 22 targets, 60s each
 
 ```bash
 # Bring up a 3-node Raft cluster (KMS in local dev mode)
+# BE SURE TO CHANGE DEFAULT VAULT_LOCAL_MASTER_KEY and remove it from production .env after creating your secrets!
 cd docker && cp .env.example .env && docker compose up --build
 ```
 
@@ -192,6 +193,10 @@ curl -sS -X POST localhost:8200/v1/secrets \
 |----------|---------|-------------|
 | `NODE_ID` | `1` | This node's id (Raft node id + audit label). The only value that differs per node. |
 | `VAULT_PEERS` | *(empty)* | Cluster map `id=host:port,…` of the **Raft** addresses, identical on every node. One entry (or empty) ⇒ single-node, Raft disabled; two or more ⇒ replicated cluster. |
+| `VAULT_RAFT_BIND` | `0.0.0.0` | Address the node-to-node port binds to. Set it to this node's private address so the port is not reachable from any other interface. |
+| `VAULT_CLUSTER_TOKEN` | — | Shared credential sent on every node-to-node request. Same value on every node. |
+| `VAULT_CLUSTER_AUTH_REQUIRED` | `false` | Refuse node-to-node requests that do not carry `VAULT_CLUSTER_TOKEN`. Set the token on every node first, then turn this on everywhere; the other order splits the cluster! |
+| `VAULT_RAFT_PEER_CHECK` | `false` | Refuse node-to-node connections whose source address is not one of the addresses in `VAULT_PEERS`. Leave it off if peers reach each other through address translation. |
 | `VAULT_API_PORT` | `8200` | Public REST API bind port (`0.0.0.0:PORT`). The external address is whatever your load balancer / port mapping exposes. |
 | `VAULT_DB_PATH` | `vault.redb` | Path to this node's redb file. |
 | `VAULT_BOOTSTRAP_TOKEN` | — | If set, seeds a `bootstrap-admin` token (mapped to the built-in `admin` role) on startup. Set the same value on every node for a fresh cluster, then rotate it. |
@@ -201,15 +206,19 @@ curl -sS -X POST localhost:8200/v1/secrets \
 | `VAULT_KMS_MODE` | `aws` | `aws` (production) or `local` (dev only). |
 | `VAULT_KMS_KEY_ID` | — | AWS KMS key id/ARN (required for `aws`). |
 | `VAULT_LOCAL_MASTER_KEY` | — | base64 32-byte master key for `local` mode. |
-| `VAULT_ROTATION_POLL_SECS` | `15` | How often the leader scans for due rotations. |
+| `VAULT_ROTATION_POLL_SECS` | `15` | How often the leader scans for due rotations. `rotation_interval_secs` and `grace_period_secs` on a secret are capped at 100 years. |
+| `VAULT_PG_TARGET_HOSTS` | *(empty → the hosts already used by stored `pg_replica` targets)* | Comma-separated `host:port` list of the Postgres endpoints a rotation `target` is allowed to connect to. A target naming any other host is rejected at create time and refused again at rotation time. When unset, the node seeds the list at startup from the targets already in its database, so an upgrade keeps rotating the secrets it already had; set it explicitly to stop depending on that. |
+| `VAULT_PG_TARGET_TLS` | `prefer` | `verify-full` = require TLS and verify the server certificate chain and hostname; `prefer` = use TLS when the Postgres server offers it, plaintext when it does not; `disable` = always plaintext. |
+| `VAULT_PG_TARGET_CA_FILE` | *(system trust store)* | PEM file of CA certificates used to verify the Postgres server certificate. |
 | `VAULT_DEK_CACHE_TTL_SECS` | `300` | TTL of the in-memory decrypted-DEK cache. `0` disables. |
 | `VAULT_KMS_MAX_RETRIES` | `5` | Retry KMS calls up to N times with exponential backoff. `0` disables. |
 | `VAULT_KMS_REWRAP_ENABLED` | `false` | Re-wrap data keys onto new CMK material after a KMS key rotation. Enable only after every node runs a build that understands it. |
 | `VAULT_KMS_REWRAP_POLL_SECS` | `86400` | How often the leader polls `kms:ListKeyRotations` for a new rotation. |
 | `VAULT_KMS_REWRAP_MAX_PER_SEC` | `10` | Re-wrap pacing (KMS `ReEncrypt` + Raft writes per second). `0` disables pacing. |
-| `VAULT_AUTH_MAX_FAILURES` | `5` | Failed auth/authz attempts (per client IP) before lockout. `0` disables. |
+| `VAULT_AUTH_MAX_FAILURES` | `5` | Failed attempts before lockout, counted per sending address for auth/authz failures and per sending address and secret name for `/verify` mismatches. The address is always the TCP peer, never `X-Forwarded-For`. `0` disables. |
 | `VAULT_AUTH_LOCKOUT_SECS` | `900` | How long a locked-out IP stays locked. |
 | `VAULT_AUTH_WINDOW_SECS` | `300` | Window over which failures accumulate. |
+| `VAULT_TOKEN_TOUCH_SECS` | `300` | Shortest gap between writes of a token's `last_used_at`. On a cluster each write goes through Raft, so this bounds that cost; `0` writes on every authenticated request. |
 
 For AWS mode, AWS credentials and region come from the standard AWS SDK
 environment (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, or an

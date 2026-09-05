@@ -9,6 +9,13 @@ pub enum KmsMode {
     Local,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PgTlsMode {
+    VerifyFull,
+    Prefer,
+    Disable,
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub node_id: u64,
@@ -22,7 +29,14 @@ pub struct Config {
     pub kms_mode: KmsMode,
     pub kms_key_id: String,
     pub local_master_key_b64: Option<String>,
+    pub raft_bind: String,
+    pub cluster_token: Option<String>,
+    pub cluster_auth_required: bool,
+    pub raft_peer_check: bool,
     pub rotation_poll_secs: u64,
+    pub pg_target_hosts: String,
+    pub pg_target_tls: PgTlsMode,
+    pub pg_target_ca_file: Option<String>,
     pub dek_cache_ttl_secs: u64,
     pub kms_max_retries: u32,
     pub kms_rewrap_enabled: bool,
@@ -31,6 +45,7 @@ pub struct Config {
     pub auth_max_failures: u32,
     pub auth_lockout_secs: i64,
     pub auth_window_secs: i64,
+    pub token_touch_secs: i64,
 }
 
 impl Config {
@@ -64,6 +79,24 @@ impl Config {
             bail!("VAULT_KMS_KEY_ID is required when VAULT_KMS_MODE=aws");
         }
 
+        let cluster_token = env_opt("VAULT_CLUSTER_TOKEN");
+        let cluster_auth_required = parse_bool(&env_or("VAULT_CLUSTER_AUTH_REQUIRED", "false"));
+        if cluster_auth_required && cluster_token.is_none() {
+            bail!("VAULT_CLUSTER_AUTH_REQUIRED=true requires VAULT_CLUSTER_TOKEN");
+        }
+
+        let pg_target_tls = match env_or("VAULT_PG_TARGET_TLS", "prefer")
+            .to_lowercase()
+            .as_str()
+        {
+            "verify-full" => PgTlsMode::VerifyFull,
+            "prefer" => PgTlsMode::Prefer,
+            "disable" => PgTlsMode::Disable,
+            other => bail!(
+                "VAULT_PG_TARGET_TLS must be 'verify-full', 'prefer' or 'disable', got '{other}'"
+            ),
+        };
+
         let local_master_key_b64 = env_opt("VAULT_LOCAL_MASTER_KEY");
         if kms_mode == KmsMode::Local && local_master_key_b64.is_none() {
             tracing::warn!(
@@ -84,9 +117,16 @@ impl Config {
             kms_mode,
             kms_key_id,
             local_master_key_b64,
+            raft_bind: env_or("VAULT_RAFT_BIND", "0.0.0.0"),
+            cluster_token,
+            cluster_auth_required,
+            raft_peer_check: parse_bool(&env_or("VAULT_RAFT_PEER_CHECK", "false")),
             rotation_poll_secs: env_or("VAULT_ROTATION_POLL_SECS", "15")
                 .parse()
                 .context("VAULT_ROTATION_POLL_SECS must be an integer")?,
+            pg_target_hosts: env_or("VAULT_PG_TARGET_HOSTS", ""),
+            pg_target_tls,
+            pg_target_ca_file: env_opt("VAULT_PG_TARGET_CA_FILE"),
             dek_cache_ttl_secs: env_or("VAULT_DEK_CACHE_TTL_SECS", "300")
                 .parse()
                 .context("VAULT_DEK_CACHE_TTL_SECS must be an integer (seconds; 0 disables)")?,
@@ -108,6 +148,9 @@ impl Config {
                 .context("VAULT_AUTH_LOCKOUT_SECS must be an integer (seconds a lockout lasts)")?,
             auth_window_secs: env_or("VAULT_AUTH_WINDOW_SECS", "300").parse().context(
                 "VAULT_AUTH_WINDOW_SECS must be an integer (failure accumulation window)",
+            )?,
+            token_touch_secs: env_or("VAULT_TOKEN_TOUCH_SECS", "300").parse().context(
+                "VAULT_TOKEN_TOUCH_SECS must be an integer (seconds between last_used_at writes; 0 writes on every request)",
             )?,
         })
     }

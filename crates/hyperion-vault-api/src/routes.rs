@@ -1,5 +1,6 @@
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Request, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
@@ -7,7 +8,7 @@ use tower_http::trace::TraceLayer;
 use crate::dto::{
     BatchGetRequest, CreateRoleRequest, CreateSecretRequest, CreateTokenRequest, RewrapRunResponse,
     RewrapStatusResponse, RoleInfo, SecretMetadata, SecretValue, SetPermissionsRequest,
-    TokenCreated, TokenInfo, UpdateSecretRequest, VerifyRequest, VerifyResponse,
+    TokenCreated, TokenInfo, UpdateSecretRequest, VerifyRequest,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::guards::{AdminActor, ReaderGuard};
@@ -23,11 +24,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/readyz", get(readyz))
         .route("/v1/secrets", post(create_secret).get(list_secrets))
         .route(
-            "/v1/secrets/{name}",
-            get(get_secret).put(update_secret).delete(delete_secret),
+            "/v1/secrets/{*name}",
+            get(get_secret)
+                .put(update_secret)
+                .delete(delete_secret)
+                .post(secret_action),
         )
-        .route("/v1/secrets/{name}/rotate", post(rotate_secret))
-        .route("/v1/secrets/{name}/verify", post(verify_secret))
         .route("/v1/batch/secrets", post(batch_get_secrets))
         .route("/v1/roles", post(create_role).get(list_roles))
         .route("/v1/roles/{name}", get(get_role).delete(delete_role))
@@ -52,6 +54,7 @@ async fn create_secret(
     Json(req): Json<CreateSecretRequest>,
 ) -> ApiResult<(StatusCode, Json<SecretValue>)> {
     authz::authorize(&state, &actor, "create", &req.name).await?;
+    authz::authorize_rotation_target(&state, &actor, &req).await?;
     let value = service::create_secret(&state, &actor.name, req).await?;
     Ok((StatusCode::CREATED, Json(value)))
 }
@@ -110,26 +113,35 @@ async fn delete_secret(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn rotate_secret(
+// A secret name may contain '/', so the route captures the whole remaining path
+// and the action is the last segment: "db/password/rotate" rotates "db/password".
+async fn secret_action(
     State(state): State<SharedState>,
-    actor: AdminActor,
-    Path(name): Path<String>,
-) -> ApiResult<Json<SecretValue>> {
-    authz::authorize(&state, &actor, "rotate", &name).await?;
-    Ok(Json(
-        service::rotate(&state, &actor.name, None, &name).await?,
-    ))
-}
+    Path(path): Path<String>,
+    request: Request,
+) -> ApiResult<Response> {
+    let (name, action) = path.rsplit_once('/').ok_or(ApiError::NotFound)?;
+    let (mut parts, body) = request.into_parts();
 
-async fn verify_secret(
-    State(state): State<SharedState>,
-    guard: ReaderGuard,
-    Path(name): Path<String>,
-    Json(req): Json<VerifyRequest>,
-) -> ApiResult<Json<VerifyResponse>> {
-    Ok(Json(
-        service::verify(&state, &name, guard.client_ip, &req.value).await?,
-    ))
+    match action {
+        "rotate" => {
+            let actor = AdminActor::from_request_parts(&mut parts, &state).await?;
+            authz::authorize(&state, &actor, "rotate", name).await?;
+            let value = service::rotate(&state, &actor.name, None, name).await?;
+            Ok(Json(value).into_response())
+        }
+        "verify" => {
+            let guard = ReaderGuard::from_request_parts(&mut parts, &state).await?;
+            let request = Request::from_parts(parts, body);
+            let Json(req) = Json::<VerifyRequest>::from_request(request, &state)
+                .await
+                .map_err(|err| ApiError::BadRequest(err.body_text()))?;
+            let response =
+                service::verify(&state, name, guard.client_ip, guard.peer_ip, &req.value).await?;
+            Ok(Json(response).into_response())
+        }
+        _ => Err(ApiError::NotFound),
+    }
 }
 
 async fn create_role(

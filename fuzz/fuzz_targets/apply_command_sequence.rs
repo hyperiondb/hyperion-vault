@@ -341,7 +341,7 @@ mod imp {
                 window_secs,
                 lockout_secs,
             } => Command::RecordAuthFailure {
-                ip: ip.clone(),
+                key: ip.clone(),
                 now: i64::from(*now),
                 max: u32::from(*max),
                 window_secs: i64::from(*window_secs),

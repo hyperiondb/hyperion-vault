@@ -12,6 +12,10 @@ use crate::store::{BackupData, Command, RoleRecord, TokenRecord};
 
 const BUILTIN_ADMIN_ROLE: &str = "admin";
 
+// A replicated restore travels as one raft log entry, so it has to fit inside
+// the node-to-node body limit with room for the rest of the append request.
+const MAX_REPLICATED_RESTORE_BYTES: usize = crate::raft::types::RPC_BODY_LIMIT / 2;
+
 pub async fn backup(state: &AppState, actor: &str) -> ApiResult<BackupData> {
     let data = state.store.dump().await?;
     audit(state, Some(actor), None, "backup", None, "ok").await;
@@ -19,6 +23,16 @@ pub async fn backup(state: &AppState, actor: &str) -> ApiResult<BackupData> {
 }
 
 pub async fn restore(state: &AppState, actor: &str, data: BackupData) -> ApiResult<()> {
+    if state.raft.is_some() {
+        let encoded = serde_json::to_vec(&data)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        if encoded > MAX_REPLICATED_RESTORE_BYTES {
+            return Err(ApiError::BadRequest(format!(
+                "backup is {encoded} bytes encoded; a replicated restore is limited to {MAX_REPLICATED_RESTORE_BYTES} bytes because it travels as one raft log entry"
+            )));
+        }
+    }
     if data.version != BACKUP_VERSION {
         return Err(ApiError::BadRequest(format!(
             "unsupported backup version {} (this build restores version {BACKUP_VERSION})",

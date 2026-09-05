@@ -19,6 +19,10 @@ fn temp_db_path() -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn test_auth() -> std::sync::Arc<hyperion_vault_api::raft::PeerAuth> {
+    std::sync::Arc::new(hyperion_vault_api::raft::PeerAuth::disabled())
+}
+
 fn peer_map(addr: &str) -> BTreeMap<u64, String> {
     let mut peers = BTreeMap::new();
     peers.insert(1, addr.to_string());
@@ -27,7 +31,7 @@ fn peer_map(addr: &str) -> BTreeMap<u64, String> {
 
 async fn start_leader(addr: &str) -> std::sync::Arc<RaftNode> {
     let store = RedbStore::open(temp_db_path(), 1).expect("open redb store");
-    let node = RaftNode::start(store, 1, peer_map(addr))
+    let node = RaftNode::start(store, 1, peer_map(addr), test_auth())
         .await
         .expect("raft node must construct (raft tables created)");
     node.bootstrap().await.expect("bootstrap");
@@ -59,7 +63,7 @@ async fn empty_lowest_node_skips_init_when_a_peer_reports_a_cluster() {
     let mut peers = BTreeMap::new();
     peers.insert(1, "127.0.0.1:17595".to_string());
     peers.insert(2, peer_addr.to_string());
-    let node = RaftNode::start(store, 1, peers)
+    let node = RaftNode::start(store, 1, peers, test_auth())
         .await
         .expect("raft node must construct");
 
@@ -78,7 +82,7 @@ async fn empty_lowest_node_skips_init_when_a_peer_reports_a_cluster() {
 #[tokio::test]
 async fn raft_node_construction_creates_required_tables() {
     let store = RedbStore::open(temp_db_path(), 1).expect("open redb store");
-    let node = RaftNode::start(store, 1, peer_map("127.0.0.1:17400")).await;
+    let node = RaftNode::start(store, 1, peer_map("127.0.0.1:17400"), test_auth()).await;
     assert!(
         node.is_ok(),
         "RaftNode::start must succeed; openraft reads raft_log/raft_meta during construction"

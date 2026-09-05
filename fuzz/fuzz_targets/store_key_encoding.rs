@@ -1,15 +1,17 @@
 #![no_main]
 
-// KNOWN-FAILING TARGET. This reproduces the secret-version key collision
-// described in VULN.md as VULN-2 (and in todo.md section 2.1). It is expected
-// to exit non-zero within seconds until the key encoding (or every write path
-// that reaches it) is fixed. `fuzz/run-all.sh` lists it under KNOWN_FAILING so
-// a sweep still reports the other targets.
+// Pins the secret-version key contract described in VULN.md as VULN-2. Names
+// and versions are validated on every write path, so `version_key` is only ever
+// called with a valid pair; every scan of the byte range decides membership
+// with `version_from_key`, which must never accept another secret's row.
 
 #[cfg(feature = "api")]
 mod imp {
     use arbitrary::Arbitrary;
-    use hyperion_vault_api::store::engine::{version_key, version_lower, version_upper};
+    use hyperion_vault_api::store::engine::{
+        version_from_key, version_key, version_lower, version_upper,
+    };
+    use hyperion_vault_core::{is_valid_secret_name, is_valid_secret_version};
 
     #[derive(Arbitrary, Debug)]
     pub struct Input {
@@ -36,33 +38,46 @@ mod imp {
             version_b,
         } = input;
 
-        assert!(
-            inside_scan_range(&version_key(&name_a, version_a), &name_a),
-            "a secret's own version row must fall inside its own scan range"
-        );
-
-        assert!(
-            version_a == version_b
-                || version_key(&name_a, version_a) != version_key(&name_a, version_b),
-            "two versions of one secret must not share a key"
-        );
-
-        // `live_versions` sorts by the scan order, so byte order must follow
-        // numeric order.
-        if version_a < version_b {
+        // Isolation holds for arbitrary input, including a name a write path
+        // would reject: a row belongs to a scan only if `version_from_key`
+        // accepts it, and it must never accept another secret's row.
+        if name_a != name_b {
             assert!(
-                version_key(&name_a, version_a) < version_key(&name_a, version_b),
-                "key byte order must match version numeric order"
+                version_from_key(&name_a, &version_key(&name_b, version_b)).is_none(),
+                "another secret's version row was accepted by this secret's scan"
             );
         }
 
-        // Isolation: one secret's rows must never be visible to, or deletable
-        // by, a scan of a different secret.
-        if name_a != name_b {
+        let valid_a = is_valid_secret_name(&name_a) && is_valid_secret_version(version_a);
+        let valid_b = is_valid_secret_name(&name_b) && is_valid_secret_version(version_b);
+
+        if valid_a {
+            let key_a = version_key(&name_a, version_a);
             assert!(
-                !inside_scan_range(&version_key(&name_b, version_b), &name_a),
-                "another secret's version row fell inside this secret's scan range"
+                inside_scan_range(&key_a, &name_a),
+                "a secret's own version row must fall inside its own scan range"
             );
+            assert_eq!(
+                version_from_key(&name_a, &key_a),
+                Some(version_a),
+                "a secret's own version row must parse back to its version"
+            );
+        }
+
+        if valid_a && valid_b && name_a == name_b {
+            assert!(
+                version_a == version_b
+                    || version_key(&name_a, version_a) != version_key(&name_a, version_b),
+                "two versions of one secret must not share a key"
+            );
+            // `live_versions` sorts by the scan order, so byte order must
+            // follow numeric order.
+            if version_a < version_b {
+                assert!(
+                    version_key(&name_a, version_a) < version_key(&name_a, version_b),
+                    "key byte order must match version numeric order"
+                );
+            }
         }
     }
 }

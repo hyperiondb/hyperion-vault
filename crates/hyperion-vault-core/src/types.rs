@@ -48,6 +48,30 @@ impl SecretFormat {
     }
 }
 
+pub const MAX_SECRET_NAME_LEN: usize = 255;
+pub const MIN_SECRET_VERSION: i32 = 1;
+
+pub fn is_valid_secret_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_SECRET_NAME_LEN
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))
+}
+
+pub fn is_valid_secret_version(version: i32) -> bool {
+    version >= MIN_SECRET_VERSION
+}
+
+pub fn is_normalized_secret_name(name: &str) -> bool {
+    is_valid_secret_name(name)
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && name
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
 pub fn aad_for(name: &str, version: i32) -> Vec<u8> {
     let mut aad = Vec::with_capacity(name.len() + 12);
     aad.extend_from_slice(name.as_bytes());
@@ -65,6 +89,36 @@ mod tests {
         for f in [SecretFormat::Opaque, SecretFormat::Userpass] {
             assert_eq!(SecretFormat::parse(f.as_str()), Some(f));
         }
+    }
+
+    #[test]
+    fn secret_name_rules_reject_separator_bytes() {
+        assert!(is_valid_secret_name("db/password"));
+        assert!(!is_valid_secret_name("x\u{0}y"));
+        assert!(!is_valid_secret_name("x\u{1}y"));
+        assert!(!is_valid_secret_name(""));
+        assert!(!is_valid_secret_name(&"a".repeat(MAX_SECRET_NAME_LEN + 1)));
+    }
+
+    #[test]
+    fn a_normalized_name_has_no_dot_or_empty_segments() {
+        assert!(is_normalized_secret_name("db/password"));
+        assert!(is_normalized_secret_name("a.b/c-d_e"));
+        assert!(!is_normalized_secret_name("a/../b"));
+        assert!(!is_normalized_secret_name("a/./b"));
+        assert!(!is_normalized_secret_name("a//b"));
+        assert!(!is_normalized_secret_name("/a"));
+        assert!(!is_normalized_secret_name("a/"));
+        assert!(!is_normalized_secret_name(".."));
+        assert!(!is_normalized_secret_name("."));
+    }
+
+    #[test]
+    fn secret_version_must_be_positive() {
+        assert!(is_valid_secret_version(1));
+        assert!(!is_valid_secret_version(0));
+        assert!(!is_valid_secret_version(-1));
+        assert!(!is_valid_secret_version(i32::MIN));
     }
 
     #[test]

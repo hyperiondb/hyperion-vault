@@ -21,9 +21,7 @@ esac
 # Targets that reproduce a defect that is reported but not yet fixed. They are
 # still run — the output tells you the finding is still there — but they do not
 # fail the sweep. Each name is followed by the VULN.md id it reproduces.
-declare -A KNOWN_FAILING=(
-  [store_key_encoding]="VULN-2"
-)
+declare -A KNOWN_FAILING=()
 
 # The serde targets are byte mutators over JSON; a dictionary of the punctuation
 # and every field name is a large, cheap coverage win.
