@@ -17,8 +17,10 @@ mod imp {
         assert!(host.len() <= raw.len(), "the host must not grow the input");
 
         if !raw.contains(':') {
-            assert_eq!(host, raw, "a colon-free input is entirely the host");
             assert_eq!(port, 5432, "a colon-free input takes the default port");
+            if !raw.starts_with('[') {
+                assert_eq!(host, raw, "an unbracketed colon-free input is all host");
+            }
         }
 
         // A well-formed "host:port" must survive the split unchanged.

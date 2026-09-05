@@ -7,6 +7,7 @@ mod imp {
     use hyperion_vault_api::service::{
         normalize_grace, validate_field, validate_name, validate_value,
     };
+    use hyperion_vault_core::rotation::MAX_GRACE_SECS;
 
     #[derive(Arbitrary, Debug)]
     pub struct Input {
@@ -51,10 +52,13 @@ mod imp {
         }
 
         match normalize_grace(grace) {
-            Ok(secs) => assert!(secs >= 0, "a normalized grace period must not be negative"),
+            Ok(secs) => assert!(
+                (0..=MAX_GRACE_SECS).contains(&secs),
+                "a normalized grace period must be between zero and the maximum"
+            ),
             Err(_) => assert!(
-                grace.is_some_and(|value| value < 0),
-                "normalize_grace must only reject a negative grace period"
+                grace.is_some_and(|value| !(0..=MAX_GRACE_SECS).contains(&value)),
+                "normalize_grace must only reject a grace period outside that range"
             ),
         }
         assert_eq!(

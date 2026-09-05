@@ -10,8 +10,9 @@ mod imp {
     use hyperion_vault_api::raft::store::{init_raft_tables, StateMachine};
     use hyperion_vault_api::raft::types::NodeId;
     use hyperion_vault_api::store::engine::{
-        RedbStore, KMS_REWRAP, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS,
+        split_version_key, RedbStore, KMS_REWRAP, ROLES, SECRETS, TOKENS, TOKENS_BY_NAME, VERSIONS,
     };
+    use hyperion_vault_core::{is_valid_secret_name, is_valid_secret_version};
     use openraft::storage::RaftStateMachine;
     use openraft::{
         BasicNode, CommittedLeaderId, LogId, Membership, SnapshotMeta, StoredMembership,
@@ -30,10 +31,9 @@ mod imp {
         pub tokens: Vec<(Vec<u8>, Vec<u8>)>,
         pub tokens_by_name: Vec<(String, Vec<u8>)>,
         pub kms_rewrap: Vec<(String, Vec<u8>)>,
-        // Always present, never None. `install_snapshot` writes `last_applied`
-        // as an `Option<LogId>` while every reader parses a bare `LogId`, so a
-        // snapshot with no `last_log_id` bricks the node — reported as VULN-18
-        // rather than rediscovered on every run.
+        // Always present, never None; the None case has its own unit test in
+        // raft::store, and keeping it Some here keeps the log-truncation
+        // assertion below meaningful.
         pub last_log_id: (u32, u64),
         pub raw_instead: Option<Vec<u8>>,
     }
@@ -95,6 +95,19 @@ mod imp {
             .collect()
     }
 
+    // install_snapshot refuses any row the ordinary write paths would refuse.
+    fn rows_are_acceptable(input: &Input) -> bool {
+        input
+            .secrets
+            .iter()
+            .all(|(name, _)| is_valid_secret_name(name))
+            && input.versions.iter().all(|(key, _)| {
+                split_version_key(key).is_some_and(|(name, version)| {
+                    is_valid_secret_name(name) && is_valid_secret_version(version)
+                })
+            })
+    }
+
     // redb keeps one row per key and orders by key.
     fn collapse<K: Ord + Clone, V: Clone>(rows: &[(K, V)]) -> Vec<(K, V)> {
         rows.iter()
@@ -104,9 +117,9 @@ mod imp {
             .collect()
     }
 
-    // A snapshot arrives from a peer over `POST /raft/snapshot` and its rows are
-    // written to the tables with no per-row validation, so the whole install
-    // must be total and must leave the store in exactly the snapshot's state.
+    // A snapshot arrives from a peer over `POST /raft/snapshot`. Rows the write
+    // paths would refuse are rejected whole; every other snapshot must install
+    // and must leave the store in exactly the snapshot's state.
     pub fn run(input: Input) {
         let db = Arc::new(memory_db());
         init_raft_tables(&db).expect("init raft tables");
@@ -167,11 +180,9 @@ mod imp {
         });
 
         if installed.is_err() {
-            // Only malformed bytes may be rejected; a snapshot this target built
-            // itself must always install.
             assert!(
-                input.raw_instead.is_some(),
-                "a well-formed snapshot must install"
+                input.raw_instead.is_some() || !rows_are_acceptable(&input),
+                "a snapshot carrying only acceptable rows must install"
             );
             return;
         }
