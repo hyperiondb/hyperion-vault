@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["Tadas Talaikis <info@nordlet.com>"]
@@ -31,12 +31,12 @@ sha2 = "=0.11.0"
 subtle = "=2.6.1"
 base64 = "=0.22.1"
 ipnet = "=2.12.0"
-anyhow = "=1.0.102"
+anyhow = "=1.0.103"
 redb = "=4.1.0"
 time = { version = "=0.3.49", features = ["formatting"] }
 openraft = { version = "=0.9.25", features = ["serde", "storage-v2", "loosen-follower-log-revert"] }
 reqwest = { version = "=0.12.23", default-features = false, features = ["json"] }
-hyperion-vault-core = { path = "crates/hyperion-vault-core", version = "=1.0.0" }
+hyperion-vault-core = { path = "crates/hyperion-vault-core", version = "=1.0.1" }
 
 [profile.dev]
 panic = "unwind"

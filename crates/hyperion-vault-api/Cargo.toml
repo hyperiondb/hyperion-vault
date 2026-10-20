@@ -28,14 +28,15 @@ tracing-subscriber.workspace = true
 base64.workspace = true
 zeroize.workspace = true
 axum = "=0.8.9"
-async-trait = "=0.1.89"
+async-trait = "=0.1.92"
 tokio-postgres = "0.7"
 tower-http = { version = "=0.6.11", features = ["trace", "limit"] }
 aws-config = "=1.8.18"
 aws-sdk-kms = { version = "=1.111.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 tokio-postgres-rustls = { version = "=0.14.0", default-features = false, features = ["aws-lc-rs"] }
-rustls = { version = "=0.23.40", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
 rustls-native-certs = "=0.8.4"
+mimalloc = { version = "=0.1.52", features = ["secure"] }
 
 [dev-dependencies]
 hyper = { version = "=1.10.1", features = ["client"] }
