@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["Tadas Talaikis <info@nordlet.com>"]
@@ -20,7 +20,7 @@ categories = ["database", "cryptography"]
 [workspace.dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
-tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 thiserror = "=2.0.18"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
@@ -36,7 +36,7 @@ redb = "=4.1.0"
 time = { version = "=0.3.49", features = ["formatting"] }
 openraft = { version = "=0.9.25", features = ["serde", "storage-v2", "loosen-follower-log-revert"] }
 reqwest = { version = "=0.12.23", default-features = false, features = ["json"] }
-hyperion-vault-core = { path = "crates/hyperion-vault-core", version = "=1.0.1" }
+hyperion-vault-core = { path = "crates/hyperion-vault-core", version = "=1.0.2" }
 
 [profile.dev]
 panic = "unwind"

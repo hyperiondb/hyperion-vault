@@ -36,6 +36,8 @@ aws-sdk-kms = { version = "=1.111.0", default-features = false, features = ["def
 tokio-postgres-rustls = { version = "=0.14.0", default-features = false, features = ["aws-lc-rs"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
 rustls-native-certs = "=0.8.4"
+rustls-webpki = { version = "=0.103.16", default-features = false }
+ctutils = { version = "=0.4.6", default-features = false }
 mimalloc = { version = "=0.1.52", features = ["secure"] }
 
 [dev-dependencies]

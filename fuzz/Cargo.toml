@@ -18,7 +18,7 @@ hyperion-vault-api = { path = "../crates/hyperion-vault-api", optional = true }
 openraft = { version = "=0.9.25", features = ["serde", "storage-v2", "loosen-follower-log-revert"], optional = true }
 redb = { version = "=4.1.0", optional = true }
 axum = { version = "=0.8.9", optional = true }
-tokio = { version = "=1.52.3", features = ["rt"], optional = true }
+tokio = { version = "=1.54.1", features = ["rt"], optional = true }
 
 [features]
 # The API targets pull in the full server dependency tree (redb, openraft,
